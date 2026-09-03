@@ -92,14 +92,14 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --prefix frontend
 
+      - name: Build frontend
+        run: npm --prefix frontend run build
+
       - name: Test backend
         run: go test ./...
 
       - name: Vet backend
         run: go vet ./...
-
-      - name: Build frontend
-        run: npm --prefix frontend run build
 
       - name: Build production application
         run: wails build -clean -m -s -skipbindings -trimpath -platform "${{ matrix.platform }}" -o "${{ matrix.output }}"
@@ -130,4 +130,3 @@ jobs:
           path: release/
           if-no-files-found: error
           retention-days: 30
-
