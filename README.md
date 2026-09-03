@@ -64,6 +64,18 @@ wails build -platform windows/amd64 -o QueryNest-windows-amd64.exe
 
 Use `windows/arm64` instead for Windows on ARM. Add `-nsis` when NSIS is installed if you want a Windows installer rather than a standalone executable.
 
+## Automated release builds
+
+GitHub Actions builds production artifacts only when a commit reaches `main`, including commits created by merging another branch. Pull requests and pushes to other branches do not trigger the workflow.
+
+Each run produces:
+
+- `QueryNest-windows-amd64.exe` for Windows x64
+- `QueryNest-macos-universal.zip` for Intel and Apple Silicon Macs
+- A SHA-256 checksum beside each package
+
+Artifacts are available from the workflow run for 30 days. The macOS bundle is ad-hoc signed; public distribution without Gatekeeper warnings still requires an Apple Developer ID certificate and notarization credentials.
+
 ## Frontend-only preview
 
 The frontend includes a local mock database for browser development:
