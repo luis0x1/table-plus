@@ -74,7 +74,7 @@ Each run produces:
 - `QueryNest-macos-universal.zip` for Intel and Apple Silicon Macs
 - A SHA-256 checksum beside each package
 
-Artifacts are available from the workflow run for 30 days. The macOS bundle is ad-hoc signed; public distribution without Gatekeeper warnings still requires an Apple Developer ID certificate and notarization credentials.
+The workflow first uploads per-platform Actions artifacts, then waits for both native builds to succeed before publishing one GitHub Release tagged `build-<run-number>-<short-sha>`. Workflow artifacts remain available for 30 days; GitHub Release assets remain attached to the release. The macOS bundle is ad-hoc signed, so public distribution without Gatekeeper warnings still requires an Apple Developer ID certificate and notarization credentials.
 
 ## Frontend-only preview
 

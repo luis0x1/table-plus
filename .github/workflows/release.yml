@@ -1,4 +1,4 @@
-name: Build release artifacts
+name: Build and publish release
 
 on:
   push:
@@ -14,6 +14,7 @@ concurrency:
 
 env:
   WAILS_VERSION: v2.15.0
+  GOPROXY: https://proxy.golang.org|direct
 
 jobs:
   build:
@@ -60,20 +61,56 @@ jobs:
           path: .ci-tools
           key: wails-${{ runner.os }}-${{ runner.arch }}-${{ env.WAILS_VERSION }}-${{ hashFiles('go.mod') }}
 
+      - name: Download Go modules
+        shell: bash
+        run: |
+          for attempt in 1 2 3 4; do
+            if go mod download; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 4 ]; then
+              delay=$((attempt * 10))
+              echo "Go module download attempt $attempt failed; retrying in $delay seconds."
+              sleep "$delay"
+            fi
+          done
+          echo "Unable to download Go modules after 4 attempts." >&2
+          exit 1
+
       - name: Install Wails CLI on Windows
         if: steps.wails-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force .ci-tools | Out-Null
           $env:GOBIN = Join-Path $env:GITHUB_WORKSPACE '.ci-tools'
-          go install "github.com/wailsapp/wails/v2/cmd/wails@$env:WAILS_VERSION"
+          for ($attempt = 1; $attempt -le 4; $attempt++) {
+            go install "github.com/wailsapp/wails/v2/cmd/wails@$env:WAILS_VERSION"
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            if ($attempt -lt 4) {
+              $delay = $attempt * 15
+              Write-Warning "Wails install attempt $attempt failed; retrying in $delay seconds."
+              Start-Sleep -Seconds $delay
+            }
+          }
+          throw 'Unable to install Wails CLI after 4 attempts.'
 
       - name: Install Wails CLI on macOS
         if: steps.wails-cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p .ci-tools
-          GOBIN="$PWD/.ci-tools" go install "github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}"
+          for attempt in 1 2 3 4; do
+            if GOBIN="$PWD/.ci-tools" go install "github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}"; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 4 ]; then
+              delay=$((attempt * 15))
+              echo "Wails install attempt $attempt failed; retrying in $delay seconds."
+              sleep "$delay"
+            fi
+          done
+          echo "Unable to install Wails CLI after 4 attempts." >&2
+          exit 1
 
       - name: Add Wails CLI to PATH on Windows
         if: runner.os == 'Windows'
@@ -85,9 +122,6 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: echo "$PWD/.ci-tools" >> "$GITHUB_PATH"
-
-      - name: Download Go modules
-        run: go mod download
 
       - name: Install frontend dependencies
         run: npm ci --prefix frontend
@@ -130,3 +164,44 @@ jobs:
           path: release/
           if-no-files-found: error
           retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Download Windows and macOS artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: QueryNest-*-${{ github.sha }}
+          path: release
+          merge-multiple: true
+
+      - name: Verify release contents
+        shell: bash
+        run: |
+          test -f release/QueryNest-windows-amd64.exe
+          test -f release/QueryNest-windows-amd64.exe.sha256
+          test -f release/QueryNest-macos-universal.zip
+          test -f release/QueryNest-macos-universal.zip.sha256
+
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release/* --clobber
+          else
+            gh release create "$tag" release/* \
+              --target "$GITHUB_SHA" \
+              --title "QueryNest build #${GITHUB_RUN_NUMBER}" \
+              --notes "Automated production build from main at commit ${GITHUB_SHA}."
+          fi

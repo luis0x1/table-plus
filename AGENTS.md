@@ -76,6 +76,6 @@ For a Windows x64 build from Linux:
 wails build -platform windows/amd64 -o QueryNest-windows-amd64.exe
 ```
 
-The release workflow is `.github/workflows/release.yml`. It intentionally triggers only on pushes to `main`; do not add `pull_request`, branch-wide `push`, or `workflow_dispatch` triggers unless the release policy changes.
+The release workflow is `.github/workflows/release.yml`. It intentionally triggers only on pushes to `main`; do not add `pull_request`, branch-wide `push`, or `workflow_dispatch` triggers unless the release policy changes. A GitHub Release is published only after both the Windows and macOS matrix builds succeed.
 
 Before handing off grid or draft changes, manually consider edit-on-blur, Escape cancellation, resize/drag without sorting, JSON overflow, undo/redo, discard, save, and every unsaved-change modal path.
