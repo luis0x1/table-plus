@@ -1,0 +1,12 @@
+frontend/node_modules/
+frontend/dist/
+build/bin/
+frontend/wailsjs/
+frontend/package.json.md5
+*.db
+*.sqlite
+.DS_Store
+
+# CodeGraph index and runtime files are generated per machine.
+.codegraph/*
+!.codegraph/.gitignore
