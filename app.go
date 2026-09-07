@@ -29,17 +29,26 @@ const (
 )
 
 type App struct {
-	ctx        context.Context
-	mu         sync.RWMutex
-	profilesMu sync.Mutex
-	db         *sql.DB
-	path       string
-	name       string
-	driver     string
-	readOnly   bool
+	configMu       sync.Mutex
+	configPath     string
+	ctx            context.Context
+	mu             sync.RWMutex
+	profilesMu     *sync.Mutex
+	sessionsMu     sync.RWMutex
+	sessions       map[string]*App
+	sessionOrder   []string
+	sessionID      string
+	postgresConfig *PostgresConfig
+	db             *sql.DB
+	path           string
+	name           string
+	driver         string
+	readOnly       bool
 }
 
 type ConnectionStatus struct {
+	ID        string `json:"id"`
+	Database  string `json:"database"`
 	Connected bool   `json:"connected"`
 	Name      string `json:"name"`
 	Path      string `json:"path"`
@@ -91,16 +100,20 @@ type QueryResult struct {
 	Message      string   `json:"message"`
 }
 
-func NewApp() *App { return &App{} }
+func NewApp() *App { return &App{profilesMu: &sync.Mutex{}, sessions: make(map[string]*App)} }
 
 func (a *App) startup(ctx context.Context) { a.ctx = ctx }
 
-func (a *App) shutdown(_ context.Context) { _ = a.closeDB() }
+func (a *App) shutdown(_ context.Context) { a.closeAllSessions(); _ = a.closeDB() }
 
 func (a *App) GetStatus() ConnectionStatus {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return ConnectionStatus{Connected: a.db != nil, Name: a.name, Path: a.path, Driver: a.driver, ReadOnly: a.readOnly}
+	database := a.name
+	if a.postgresConfig != nil {
+		database = a.postgresConfig.Database
+	}
+	return ConnectionStatus{ID: a.sessionID, Database: database, Connected: a.db != nil, Name: a.name, Path: a.path, Driver: a.driver, ReadOnly: a.readOnly}
 }
 
 func (a *App) ChooseSQLiteFile() (ConnectionStatus, error) {
@@ -143,32 +156,76 @@ func (a *App) ConnectSQLite(path string) (ConnectionStatus, error) {
 		_ = db.Close()
 		return ConnectionStatus{}, fmt.Errorf("connect database: %w", err)
 	}
-	a.swapDB(db, abs, strings.TrimSuffix(filepath.Base(abs), filepath.Ext(abs)), driverSQLite, false)
+	a.swapDB(db, abs, strings.TrimSuffix(filepath.Base(abs), filepath.Ext(abs)), driverSQLite, false, nil)
 	return a.GetStatus(), nil
 }
 
 func (a *App) ConnectPostgres(input PostgresConfig) (ConnectionStatus, error) {
+	input, err := normalizePostgresConfig(input)
+	if err != nil {
+		return ConnectionStatus{}, err
+	}
+	db, err := openPostgresDB(input)
+	if err != nil {
+		return ConnectionStatus{}, err
+	}
+	displayPath := fmt.Sprintf("%s:%d/%s", input.Host, input.Port, input.Database)
+	displayName := strings.TrimSpace(input.Name)
+	if displayName == "" {
+		displayName = input.Database
+	}
+	a.swapDB(db, displayPath, displayName, driverPostgres, input.ReadOnly, &input)
+	if input.SaveConnection {
+		if err := a.savePostgresProfile(input); err != nil {
+			return a.GetStatus(), fmt.Errorf("connected, but could not save connection: %w", err)
+		}
+	}
+	return a.GetStatus(), nil
+}
+
+// TestPostgresConnection uses a temporary connection without changing the active
+// database or saving a profile or password.
+func (a *App) TestPostgresConnection(input PostgresConfig) error {
+	input, err := normalizePostgresConfig(input)
+	if err != nil {
+		return err
+	}
+	db, err := openPostgresDB(input)
+	if err != nil {
+		return err
+	}
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("close PostgreSQL test connection: %w", err)
+	}
+	return nil
+}
+
+func normalizePostgresConfig(input PostgresConfig) (PostgresConfig, error) {
 	input.Host = strings.TrimSpace(input.Host)
 	input.User = strings.TrimSpace(input.User)
 	input.Database = strings.TrimSpace(input.Database)
 	input.SSLMode = strings.ToLower(strings.TrimSpace(input.SSLMode))
 	if input.Host == "" || input.User == "" || input.Database == "" {
-		return ConnectionStatus{}, errors.New("host, user, and database are required")
+		return PostgresConfig{}, errors.New("host, user, and database are required")
 	}
 	if input.Port == 0 {
 		input.Port = 5432
 	}
 	if input.Port < 1 || input.Port > 65535 {
-		return ConnectionStatus{}, errors.New("port must be between 1 and 65535")
+		return PostgresConfig{}, errors.New("port must be between 1 and 65535")
 	}
 	if input.SSLMode == "" {
 		input.SSLMode = "prefer"
 	}
 	sslModes := map[string]bool{"disable": true, "allow": true, "prefer": true, "require": true, "verify-ca": true, "verify-full": true}
 	if !sslModes[input.SSLMode] {
-		return ConnectionStatus{}, errors.New("invalid SSL mode")
+		return PostgresConfig{}, errors.New("invalid SSL mode")
 	}
 
+	return input, nil
+}
+
+func openPostgresDB(input PostgresConfig) (*sql.DB, error) {
 	endpoint := &url.URL{
 		Scheme: "postgres",
 		User:   url.UserPassword(input.User, input.Password),
@@ -180,7 +237,7 @@ func (a *App) ConnectPostgres(input PostgresConfig) (ConnectionStatus, error) {
 	endpoint.RawQuery = query.Encode()
 	config, err := pgx.ParseConfig(endpoint.String())
 	if err != nil {
-		return ConnectionStatus{}, fmt.Errorf("invalid PostgreSQL configuration: %w", err)
+		return nil, fmt.Errorf("invalid PostgreSQL configuration: %w", err)
 	}
 	if input.ReadOnly {
 		config.RuntimeParams["default_transaction_read_only"] = "on"
@@ -193,20 +250,9 @@ func (a *App) ConnectPostgres(input PostgresConfig) (ConnectionStatus, error) {
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return ConnectionStatus{}, fmt.Errorf("connect PostgreSQL: %w", err)
+		return nil, fmt.Errorf("connect PostgreSQL: %w", err)
 	}
-	displayPath := fmt.Sprintf("%s:%d/%s", input.Host, input.Port, input.Database)
-	displayName := strings.TrimSpace(input.Name)
-	if displayName == "" {
-		displayName = input.Database
-	}
-	a.swapDB(db, displayPath, displayName, driverPostgres, input.ReadOnly)
-	if input.SaveConnection {
-		if err := a.savePostgresProfile(input); err != nil {
-			return a.GetStatus(), fmt.Errorf("connected, but could not save connection: %w", err)
-		}
-	}
-	return a.GetStatus(), nil
+	return db, nil
 }
 
 func (a *App) ConnectDemo() (ConnectionStatus, error) {
@@ -288,16 +334,18 @@ func (a *App) closeDB() error {
 	}
 	err := a.db.Close()
 	a.db, a.path, a.name, a.driver, a.readOnly = nil, "", "", "", false
+	a.postgresConfig = nil
 	return err
 }
 
-func (a *App) swapDB(db *sql.DB, path, name, driver string, readOnly bool) {
+func (a *App) swapDB(db *sql.DB, path, name, driver string, readOnly bool, config *PostgresConfig) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.db != nil {
 		_ = a.db.Close()
 	}
 	a.db, a.path, a.name, a.driver, a.readOnly = db, path, name, driver, readOnly
+	a.postgresConfig = config
 }
 
 func (a *App) connection() (*sql.DB, string, error) {

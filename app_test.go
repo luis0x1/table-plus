@@ -52,6 +52,49 @@ func TestGetTableDataFilterAndSort(t *testing.T) {
 	}
 }
 
+func TestGetTableDataSortBeforePagination(t *testing.T) {
+	app := openTestApp(t)
+	// Scramble values across three pages so sorting only a page cannot pass.
+	if _, err := app.db.Exec(`CREATE TABLE paging_test (id INTEGER PRIMARY KEY, score INTEGER, label TEXT);
+		WITH RECURSIVE numbers(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM numbers WHERE i < 124)
+		INSERT INTO paging_test SELECT i + 1, (i * 37) % 125,
+		CASE WHEN ((i * 37) % 125) % 2 = 0 THEN 'keep' ELSE 'skip' END FROM numbers`); err != nil {
+		t.Fatal(err)
+	}
+	for _, filter := range []string{"", "keep"} {
+		for _, direction := range []string{"asc", "desc"} {
+			t.Run(filter+"/"+direction, func(t *testing.T) {
+				total, step := 125, 1
+				if filter != "" {
+					total, step = 63, 2
+				}
+				for offset := 0; offset < total+50; offset += 50 {
+					data, err := app.GetTableData("main", "paging_test", 50, offset, filter, "score", direction)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if data.Total != int64(total) || len(data.Rows) != max(0, min(50, total-offset)) {
+						t.Fatalf("incorrect page at %d: total=%d rows=%d", offset, data.Total, len(data.Rows))
+					}
+					for i, row := range data.Rows {
+						want := (offset + i) * step
+						if direction == "desc" {
+							want = 124 - want
+						}
+						if row[1] != int64(want) {
+							t.Fatalf("row %d: score=%v, want %d", offset+i, row[1], want)
+						}
+					}
+				}
+			})
+		}
+	}
+	data, err := app.GetTableData("main", "paging_test", 50, 0, "", "", "asc")
+	if err != nil || len(data.Rows) != 50 || data.Rows[0][1] != int64(0) || data.Rows[1][1] != int64(37) {
+		t.Fatalf("clearing the column must remove the explicit sort: %#v, %v", data, err)
+	}
+}
+
 func TestSQLiteWindowsPathURI(t *testing.T) {
 	dsn := sqliteDSN(`C:\Users\Luis\My Data\app.db`, false)
 	want := "file:///C:/Users/Luis/My%20Data/app.db?mode=rw"

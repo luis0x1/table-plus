@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, isDesktop, windowAction } from './bridge'
+import { createRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import { api, databaseApi, isDesktop, windowAction } from './bridge'
+import TabStrip from './TabStrip'
+import DatabasePicker from './DatabasePicker'
+import useSidebarPreferences from './useSidebarPreferences'
+import SidebarResizeHandle, { useCompactSidebar, useSidebarWidth, type SidebarSizing } from './SidebarResizeHandle'
 import type { ColumnInfo, ConnectionStatus, PostgresConfig, QueryResult, RowOperation, SavedConnection, TableData, TableSummary } from './types'
 import { Alert, ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Clock, Code, Columns, Database, Eye, File, Filter, Key, More, PanelLeft, Play, Plus, Redo, Refresh, Save, Search, Table, Trash, Undo, X } from './icons'
 
-const EMPTY_STATUS: ConnectionStatus = { connected: false, name: '', path: '', driver: '', readOnly: false }
 const EMPTY_DATA: TableData = { columns: [], rows: [], total: 0, durationMs: 0 }
 const PAGE_SIZE = 50
 const tableKey = (item: TableSummary) => `${item.schema}\u0000${item.name}`
@@ -140,7 +143,7 @@ function DataGrid({ data, sortColumn, sortDirection, onSort, compact = false, la
       <table className="data-grid" style={{ width: tableWidth, minWidth: tableWidth }}>
         <colgroup><col className="row-col"/>{shown.map(({ column }) => <col key={column} style={{ width: widths[column] ?? 160 }}/>)}</colgroup>
         <thead><tr><th className="row-number">#</th>{shown.map(({ column }) => (
-          <th key={column} onClick={() => onSort?.(column)} draggable={Boolean(layoutKey)} onDragStart={() => setDragging(column)} onDragOver={event => event.preventDefault()} onDrop={() => dropColumn(column)} className={`${onSort ? 'sortable' : ''} ${dragging === column ? 'dragging' : ''}`}>
+          <th key={column} aria-sort={onSort ? sortColumn === column ? sortDirection === 'asc' ? 'ascending' : 'descending' : 'none' : undefined} onClick={() => onSort?.(column)} draggable={Boolean(layoutKey)} onDragStart={() => setDragging(column)} onDragOver={event => event.preventDefault()} onDrop={() => dropColumn(column)} className={`${onSort ? 'sortable' : ''} ${dragging === column ? 'dragging' : ''}`}>
             <span>{column}</span>
             {sortColumn === column && (sortDirection === 'asc' ? <ArrowUp size={13}/> : <ArrowDown size={13}/>)}
             {layoutKey && <i className="column-resizer" onClick={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()} onPointerDown={event => resize(event, column)}/>} 
@@ -172,14 +175,43 @@ function DataGrid({ data, sortColumn, sortDirection, onSort, compact = false, la
   )
 }
 
-function Welcome({ onOpen, onPostgres, onDemo, busy }: { onOpen: () => void; onPostgres: () => void; onDemo: () => void; busy: boolean }) {
+type SavedConnectionsProps = {
+  saved: SavedConnection[]
+  busy: boolean
+  onSaved: (profile: SavedConnection) => void
+  onRemove: (id: string) => void
+}
+
+function SavedConnections({ saved, busy, onSaved, onRemove }: SavedConnectionsProps) {
+  if (!saved.length) return null
+  return <section className="saved-connections" aria-label="Saved connections">
+    <div className="saved-title"><span>Saved connections</span><em>{saved.length}</em></div>
+    <div className="saved-list">{saved.map(profile => <div key={profile.id} className="saved-item">
+      <button className="saved-row" onClick={() => onSaved(profile)} disabled={busy}>
+        <span className={`kind-logo ${profile.driver === 'PostgreSQL' ? 'postgres' : 'sqlite'}`}>{profile.driver === 'PostgreSQL' ? 'PG' : 'SQ'}</span>
+        <span><b>{profile.name}</b><small>{profile.driver === 'PostgreSQL' ? `${profile.host}:${profile.port}/${profile.database}` : profile.path}</small></span>
+        {profile.hasPassword && <Key size={13}/>}<ChevronRight size={14}/>
+      </button>
+      <button className="icon-button saved-remove" aria-label={`Delete ${profile.name}`} onClick={() => onRemove(profile.id)} disabled={busy}><X size={13}/></button>
+    </div>)}</div>
+  </section>
+}
+
+const DEFAULT_POSTGRES_CONFIG: PostgresConfig = { id: '', name: 'Local PostgreSQL', host: 'localhost', port: 5432, user: 'postgres', password: '', database: 'postgres', sslMode: 'prefer', readOnly: false, saveConnection: true, savePassword: true }
+
+function configForSaved(profile: SavedConnection): PostgresConfig {
+  return { ...DEFAULT_POSTGRES_CONFIG, id: profile.id, name: profile.name, host: profile.host ?? 'localhost', port: profile.port ?? 5432, user: profile.user ?? 'postgres', database: profile.database ?? 'postgres', sslMode: (profile.sslMode as PostgresConfig['sslMode']) ?? 'prefer', readOnly: profile.readOnly }
+}
+
+function Welcome({ onOpen, onPostgres, onDemo, busy, saved, onSaved, onRemove }: SavedConnectionsProps & { onOpen: () => void; onPostgres: () => void; onDemo: () => void }) {
   return <main className="welcome">
     <div className="welcome-glow" />
-    <div className="welcome-content">
+    <div className={`welcome-content ${saved.length ? 'has-saved' : ''}`}>
       <div className="welcome-mark"><Database size={34}/></div>
       <p className="eyebrow">DATABASE WORKSPACE</p>
       <h1>Your data, without<br/><span>the noise.</span></h1>
       <p className="welcome-copy">A fast, focused database browser for inspecting schemas, exploring records, and running safe queries.</p>
+      <SavedConnections saved={saved} busy={busy} onSaved={onSaved} onRemove={onRemove}/>
       <div className="welcome-actions">
         <button className="primary large" onClick={onOpen} disabled={busy}><File size={17}/> Open SQLite database</button>
         <button className="secondary large postgres-button" onClick={onPostgres} disabled={busy}><Database size={16}/> Connect PostgreSQL</button>
@@ -205,7 +237,121 @@ function TitleBar() {
 }
 
 export default function App() {
-  const [status, setStatus] = useState<ConnectionStatus>(EMPTY_STATUS)
+  const compactSidebar = useCompactSidebar()
+  const [sessions, setSessions] = useState<ConnectionStatus[]>([])
+  const [activeID, setActiveID] = useState('')
+  const [busy, setBusy] = useState(true)
+  const [error, setError] = useState('')
+  const sidebarPreferences = useSidebarPreferences(setError)
+  const databaseSidebar = useSidebarWidth('databases', 76, sidebarPreferences)
+  const tableSidebar = useSidebarWidth('tables', compactSidebar ? 214 : 242, sidebarPreferences)
+  const [connectionOpen, setConnectionOpen] = useState(false)
+  const [connectionConfig, setConnectionConfig] = useState<PostgresConfig>(DEFAULT_POSTGRES_CONFIG)
+  const [savedConnections, setSavedConnections] = useState<SavedConnection[]>([])
+  const workspaceRefs = useRef(new Map<string, React.RefObject<WorkspaceHandle | null>>())
+  function workspaceRef(id: string) {
+    if (!workspaceRefs.current.has(id)) workspaceRefs.current.set(id, createRef<WorkspaceHandle>())
+    return workspaceRefs.current.get(id)!
+  }
+
+  const loadSavedConnections = useCallback(async () => {
+    try { setSavedConnections(await api().ListSavedConnections() ?? []) }
+    catch (e) { setError(String(e)) }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    api().ListDatabaseSessions().then(next => {
+      if (cancelled) return
+      setSessions(next ?? []); setActiveID(next?.[0]?.id ?? '')
+    }).catch(e => { if (!cancelled) setError(String(e)) }).finally(() => { if (!cancelled) setBusy(false) })
+    void loadSavedConnections()
+    return () => { cancelled = true }
+  }, [loadSavedConnections])
+
+  function beforeLeave(run: () => void | Promise<void>) {
+    if (busy) return
+    const workspace = workspaceRefs.current.get(activeID)?.current
+    if (workspace) workspace.beforeLeave(run)
+    else void run()
+  }
+
+  function newConnection() { beforeLeave(() => { setError(''); setConnectionOpen(true) }) }
+
+  async function connect(open: () => Promise<ConnectionStatus>) {
+    setBusy(true); setError('')
+    try {
+      const next = await open()
+      if (!next.connected) return
+      setSessions(current => current.some(item => item.id === next.id) ? current : [...current, next])
+      setActiveID(next.id); setConnectionOpen(false); setConnectionConfig(DEFAULT_POSTGRES_CONFIG)
+      await loadSavedConnections()
+    } finally { setBusy(false) }
+  }
+
+  function connectFile() { void connect(() => api().ChooseSQLiteSession()).catch(e => setError(String(e))) }
+  function connectDemo() { void connect(() => api().OpenDemoSession()).catch(e => setError(String(e))) }
+
+  async function openSaved(profile: SavedConnection) {
+    if (profile.driver === 'PostgreSQL' && !profile.hasPassword) {
+      setConnectionConfig(configForSaved(profile)); setConnectionOpen(true)
+      return
+    }
+    try { await connect(() => api().OpenSavedSession(profile.id, '')) }
+    catch (e) {
+      setError(String(e))
+      if (profile.driver === 'PostgreSQL') { setConnectionConfig(configForSaved(profile)); setConnectionOpen(true) }
+    }
+  }
+
+  async function removeSaved(id: string) {
+    setBusy(true)
+    try { await api().DeleteSavedConnection(id); setSavedConnections(current => current.filter(item => item.id !== id)) }
+    catch (e) { setError(String(e)) }
+    finally { setBusy(false) }
+  }
+
+  async function closeSession(id: string) {
+    setBusy(true)
+    try {
+      await api().CloseDatabaseSession(id)
+      const remaining = sessions.filter(item => item.id !== id)
+      setSessions(remaining); setActiveID(remaining.at(-1)?.id ?? '')
+      workspaceRefs.current.delete(id)
+    } catch (e) { setError(String(e)) }
+    finally { setBusy(false) }
+  }
+
+  function openDatabase(id: string, database: string) {
+    if (sessions.find(item => item.id === id)?.database === database) return
+    beforeLeave(() => connect(() => api().OpenDatabase(id, database)).catch(e => setError(String(e))))
+  }
+
+  return <div className="app-shell">
+    <TitleBar/>
+    {!sessions.length ? <Welcome onOpen={connectFile} onPostgres={newConnection} onDemo={connectDemo} busy={busy} saved={savedConnections} onSaved={openSaved} onRemove={removeSaved}/> :
+      <div className="session-layout" aria-busy={busy}>
+        {sessions.length > 1 && <div className="resizable-database-rail" style={{ width: databaseSidebar.width, flexBasis: databaseSidebar.width }}><nav className="database-rail" aria-label="Open databases">{sessions.map(session => <button key={session.id} className={`database-rail-tab ${activeID === session.id ? 'active' : ''}`} aria-label={`Switch to ${session.database} (${session.name})`} aria-pressed={activeID === session.id} title={`${session.database} — ${session.name}\n${session.path}`} disabled={busy} onClick={() => { if (session.id !== activeID) beforeLeave(() => setActiveID(session.id)) }}><Database size={20}/><span>{session.database}</span></button>)}</nav><SidebarResizeHandle label="Resize database sidebar" sizing={databaseSidebar}/></div>}
+        <div className="database-panels" inert={busy || connectionOpen}>{sessions.map(session => <DatabaseWorkspace key={session.id} status={session} active={session.id === activeID} blocked={busy || connectionOpen} tableSidebar={tableSidebar} workspaceRef={workspaceRef(session.id)} onNewConnection={newConnection} onCloseSession={() => closeSession(session.id)} onOpenDatabase={database => openDatabase(session.id, database)}/>)}</div>
+      </div>}
+    {error && <Toast message={error} onClose={() => setError('')}/>}
+    {connectionOpen && <ConnectionModal config={connectionConfig} setConfig={setConnectionConfig} saved={savedConnections} busy={busy} onRemove={removeSaved} onSQLite={connectFile} onPostgres={config => connect(() => api().OpenPostgresSession(config))} onSaved={openSaved} onClose={() => setConnectionOpen(false)}/>}
+  </div>
+}
+
+type WorkspaceHandle = { beforeLeave: (run: () => void | Promise<void>) => void }
+
+function DatabaseWorkspace({ status, active, blocked, tableSidebar, workspaceRef, onNewConnection, onCloseSession, onOpenDatabase }: {
+  status: ConnectionStatus
+  active: boolean
+  blocked: boolean
+  tableSidebar: SidebarSizing
+  workspaceRef: React.Ref<WorkspaceHandle>
+  onNewConnection: () => void
+  onCloseSession: () => Promise<void>
+  onOpenDatabase: (database: string) => void
+}) {
+  const db = useMemo(() => databaseApi(status.id), [status.id])
   const [tables, setTables] = useState<TableSummary[]>([])
   const [activeTable, setActiveTable] = useState('')
   const [tabs, setTabs] = useState<string[]>([])
@@ -224,28 +370,31 @@ export default function App() {
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null)
   const [queryRunning, setQueryRunning] = useState(false)
   const [error, setError] = useState('')
-  const [connectionOpen, setConnectionOpen] = useState(false)
+  const savingRef = useRef(false)
   const [draftsByTable, setDraftsByTable] = useState<Record<string, DraftHistory>>({})
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set())
-  const [guardedAction, setGuardedAction] = useState<{ table: string; title: string; message: string; run: () => void | Promise<void> } | null>(null)
+  const [guardedAction, setGuardedAction] = useState<{ table: string; tables?: string[]; title: string; message: string; run: () => void | Promise<void> } | null>(null)
   const activeSummary = tables.find(item => tableKey(item) === activeTable)
   const activeHistory = draftsByTable[activeTable] ?? { past: [], present: [], future: [] }
   const activeOperations = activeHistory.present
   const draftGrid = useMemo(() => buildDraftGrid(data, schema, activeOperations, page), [data, schema, activeOperations, page])
 
   const loadTables = useCallback(async () => {
-    const next = await api().ListTables()
+    const next = await db.ListTables()
     setTables(next ?? [])
     if (!activeTable && next?.length) openTable(next[0])
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTable])
+  }, [activeTable, db])
 
   useEffect(() => {
-    api().GetStatus().then(async next => {
-      setStatus(next)
-      if (next.connected) await loadTables()
-    }).catch(e => setError(String(e))).finally(() => setLoading(false))
-  }, [loadTables])
+    let cancelled = false
+    db.ListTables().then(next => {
+      if (cancelled) return
+      setTables(next ?? [])
+      if (next?.length) openTable(next[0])
+    }).catch(e => { if (!cancelled) setError(String(e)) }).finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [db])
 
   useEffect(() => {
     if (!activeTable || !status.connected) return
@@ -256,15 +405,15 @@ export default function App() {
       setLoading(true)
       try {
         const [nextData, nextSchema] = await Promise.all([
-          api().GetTableData(selected.schema, selected.name, PAGE_SIZE, page * PAGE_SIZE, filter, sortColumn, sortDirection),
-          api().GetTableSchema(selected.schema, selected.name),
+          db.GetTableData(selected.schema, selected.name, PAGE_SIZE, page * PAGE_SIZE, filter, sortColumn, sortDirection),
+          db.GetTableSchema(selected.schema, selected.name),
         ])
         if (!cancelled) { setData(nextData); setSchema(nextSchema) }
       } catch (e) { if (!cancelled) setError(String(e)) }
       finally { if (!cancelled) setLoading(false) }
     }, filter ? 250 : 0)
     return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [activeTable, filter, page, sortColumn, sortDirection, status.connected, tables])
+  }, [activeTable, filter, page, sortColumn, sortDirection, status.connected, tables, db])
 
   useEffect(() => { setSelectedRows(new Set()) }, [activeTable, page])
 
@@ -284,57 +433,24 @@ export default function App() {
     guardUnsaved(name, 'Close this tab?', 'This tab has changes that have not been saved.', () => closeTabNow(name))
   }
 
-  async function connect(kind: 'file' | 'demo') {
-    setLoading(true); setError('')
-    try {
-      const next = kind === 'file' ? await api().ChooseSQLiteFile() : await api().ConnectDemo()
-      setStatus(next)
-      if (next.connected) {
-        const found = await api().ListTables()
-        setTables(found ?? [])
-        if (found?.length) openTable(found[0])
-        setConnectionOpen(false)
-      }
-    } catch (e) { setError(String(e)) }
-    finally { setLoading(false) }
+  function guardWorkspace(title: string, message: string, run: () => void | Promise<void>) {
+    if (savingRef.current) return
+    const dirty = Object.keys(draftsByTable).filter(key => draftsByTable[key].present.length)
+    if (dirty.length) setGuardedAction({ table: dirty[0], tables: dirty, title, message, run })
+    else void run()
   }
 
-  async function connectPostgres(config: PostgresConfig) {
-    setLoading(true); setError('')
-    try {
-      const next = await api().ConnectPostgres(config)
-      setStatus(next)
-      const found = await api().ListTables()
-      setTables(found ?? []); setTabs([]); setActiveTable(''); setConnectionOpen(false)
-      if (found?.length) openTable(found[0])
-    } catch (e) { setError(String(e)); throw e }
-    finally { setLoading(false) }
-  }
-
-  async function connectSaved(id: string, password: string) {
-    setLoading(true); setError('')
-    try {
-      const next = await api().ConnectSavedConnection(id, password)
-      setStatus(next)
-      const found = await api().ListTables()
-      setTables(found ?? []); setTabs([]); setActiveTable(''); setConnectionOpen(false)
-      if (found?.length) openTable(found[0])
-    } catch (e) { setError(String(e)); throw e }
-    finally { setLoading(false) }
-  }
-
-  async function disconnectNow() {
-    await api().Disconnect(); setStatus(EMPTY_STATUS); setTables([]); setTabs([]); setActiveTable(''); setData(EMPTY_DATA)
-  }
+  useImperativeHandle(workspaceRef, () => ({
+    beforeLeave: run => guardWorkspace('Switch database?', 'This database has unsaved changes. Save or discard them before continuing.', run),
+  }))
 
   function disconnect() {
-    if (activeTable) guardUnsaved(activeTable, 'Disconnect database?', 'Unsaved changes in this tab will be lost.', disconnectNow)
-    else void disconnectNow()
+    guardWorkspace('Close database?', 'Unsaved changes in this database will be lost.', onCloseSession)
   }
 
   async function refreshNow() {
     setLoading(true); setError('')
-    try { await loadTables(); if (activeSummary) setData(await api().GetTableData(activeSummary.schema, activeSummary.name, PAGE_SIZE, page * PAGE_SIZE, filter, sortColumn, sortDirection)) }
+    try { await loadTables(); if (activeSummary) setData(await db.GetTableData(activeSummary.schema, activeSummary.name, PAGE_SIZE, page * PAGE_SIZE, filter, sortColumn, sortDirection)) }
     catch (e) { setError(String(e)) }
     finally { setLoading(false) }
   }
@@ -344,8 +460,9 @@ export default function App() {
   }
 
   function changeSortNow(column: string) {
-    if (sortColumn === column) setSortDirection(value => value === 'asc' ? 'desc' : 'asc')
-    else { setSortColumn(column); setSortDirection('asc') }
+    if (sortColumn !== column) { setSortColumn(column); setSortDirection('asc') }
+    else if (sortDirection === 'asc') setSortDirection('desc')
+    else { setSortColumn(''); setSortDirection('asc') }
     setPage(0)
   }
 
@@ -355,7 +472,7 @@ export default function App() {
 
   async function executeQuery() {
     setQueryRunning(true); setError('')
-    try { setQueryResult(await api().ExecuteQuery(query)) }
+    try { setQueryResult(await db.ExecuteQuery(query)) }
     catch (e) { setError(String(e)) }
     finally { setQueryRunning(false) }
   }
@@ -469,17 +586,19 @@ export default function App() {
     const item = tables.find(table => tableKey(table) === key)
     const operations = draftsByTable[key]?.present ?? []
     if (!item || !operations.length) return
+    if (savingRef.current) throw new Error('A save is already in progress.')
+    savingRef.current = true
     setLoading(true); setError('')
     try {
-      await api().ApplyChanges(item.schema, item.name, operations.map(({ id: _id, ...operation }) => operation))
+      await db.ApplyChanges(item.schema, item.name, operations.map(({ id: _id, ...operation }) => operation))
       clearDraft(key)
       if (key === activeTable) {
-        setData(await api().GetTableData(item.schema, item.name, PAGE_SIZE, page * PAGE_SIZE, filter, sortColumn, sortDirection))
+        setData(await db.GetTableData(item.schema, item.name, PAGE_SIZE, page * PAGE_SIZE, filter, sortColumn, sortDirection))
         setSelectedRows(new Set())
       }
       await loadTables()
     } catch (e) { setError(String(e)); throw e }
-    finally { setLoading(false) }
+    finally { savingRef.current = false; setLoading(false) }
   }
 
   function discardChanges(key: string) {
@@ -501,12 +620,13 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (!active || blocked) return
     const listener = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null
       const isTextEditor = target?.matches('input, textarea, [contenteditable="true"]')
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault()
-        if ((draftsByTable[activeTable]?.present ?? []).length) void saveChanges(activeTable).catch(() => {})
+        if (!guardedAction && !savingRef.current && (draftsByTable[activeTable]?.present ?? []).length) void saveChanges(activeTable).catch(() => {})
       } else if (!isTextEditor && !guardedAction && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
         event.preventDefault()
         if (event.shiftKey) redoDraft(activeTable)
@@ -516,23 +636,19 @@ export default function App() {
     window.addEventListener('keydown', listener)
     return () => window.removeEventListener('keydown', listener)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTable, draftsByTable, tables, data, filter, page, sortColumn, sortDirection, guardedAction])
+  }, [activeTable, draftsByTable, tables, data, filter, page, sortColumn, sortDirection, guardedAction, active, blocked, db])
 
   const filteredTables = useMemo(() => tables.filter(table => table.name.toLowerCase().includes(sidebarFilter.toLowerCase())), [tables, sidebarFilter])
   const tableItems = filteredTables.filter(item => item.type === 'table')
   const viewItems = filteredTables.filter(item => item.type === 'view')
   const totalPages = Math.max(1, Math.ceil(data.total / PAGE_SIZE))
 
-  if (!status.connected && !loading) {
-    return <div className="app-shell"><TitleBar/><Welcome onOpen={() => connect('file')} onPostgres={() => setConnectionOpen(true)} onDemo={() => connect('demo')} busy={loading}/>{connectionOpen && <ConnectionModal onSQLite={() => connect('file')} onPostgres={connectPostgres} onSaved={connectSaved} onClose={() => setConnectionOpen(false)}/>} {error && <Toast message={error} onClose={() => setError('')}/>}</div>
-  }
-
-  return <div className="app-shell">
-    <TitleBar/>
+  const guardedKeys = guardedAction ? guardedAction.tables ?? [guardedAction.table] : []
+  return <div className="database-workspace" hidden={!active}>
     <div className="workspace">
-      {sidebarOpen && <aside className="sidebar">
+      {sidebarOpen && <aside className="sidebar" style={{ width: tableSidebar.width, flexBasis: tableSidebar.width }}>
         <div className="brand"><div className="brand-mark"><Database size={18}/></div><span>QueryNest</span><button className="icon-button"><More size={17}/></button></div>
-        <button className="connection-card" title={status.path} onClick={() => setConnectionOpen(true)}>
+        <button className="connection-card" title={status.path} onClick={onNewConnection}>
           <span className={`db-avatar ${status.driver === 'PostgreSQL' ? 'postgres' : ''}`}>{status.driver === 'PostgreSQL' ? 'PG' : 'SQ'}</span><span className="connection-text"><b>{status.name}</b><small><i className="online-dot"/> {status.driver} · {status.readOnly ? 'Read-only' : 'Editable'}</small></span><ChevronDown size={15}/>
         </button>
         <div className="side-search"><Search size={14}/><input value={sidebarFilter} onChange={e => setSidebarFilter(e.target.value)} placeholder="Filter objects"/><kbd>⌘K</kbd></div>
@@ -540,14 +656,15 @@ export default function App() {
           <ObjectGroup label="Tables" count={tableItems.length}>{tableItems.map(item => <ObjectRow key={tableKey(item)} item={item} active={activeTable === tableKey(item)} onClick={() => openTable(item)}/>)}</ObjectGroup>
           <ObjectGroup label="Views" count={viewItems.length}>{viewItems.map(item => <ObjectRow key={tableKey(item)} item={item} active={activeTable === tableKey(item)} onClick={() => openTable(item)}/>)}</ObjectGroup>
         </div>
-        <div className="sidebar-footer"><button onClick={() => setConnectionOpen(true)}><Plus size={15}/> New connection</button><button onClick={disconnect} className="icon-button" title="Disconnect"><X size={15}/></button></div>
+        <div className="sidebar-footer"><DatabasePicker status={status} onSelect={onOpenDatabase}/><button onClick={disconnect} className="icon-button" title="Close database" aria-label="Close database"><X size={15}/></button></div>
+        <SidebarResizeHandle label="Resize table sidebar" sizing={tableSidebar}/>
       </aside>}
       <section className="main-panel">
         <div className="top-tabs">
           <button className="icon-button sidebar-toggle" onClick={() => setSidebarOpen(value => !value)} title="Toggle sidebar"><PanelLeft size={17}/></button>
-          <div className="tabs-scroll">{tabs.map(tab => { const item = tables.find(value => tableKey(value) === tab); const changes = draftsByTable[tab]?.present.length ?? 0; return item ? <button key={tab} onClick={() => setActiveTable(tab)} className={`tab ${activeTable === tab ? 'active' : ''} ${changes ? 'changed' : ''}`}><Table size={14}/><b className="tab-label">{item.name}</b>{changes > 0 && <i className="tab-change-dot" title={`${changes} pending change(s)`}/>}<span onClick={e => { e.stopPropagation(); closeTab(tab) }}><X size={13}/></span></button> : null })}</div>
+          <TabStrip activeTab={activeTable}>{tabs.map(tab => { const item = tables.find(value => tableKey(value) === tab); const changes = draftsByTable[tab]?.present.length ?? 0; return item ? <button key={tab} data-active={activeTable === tab} title={`${item.schema}.${item.name}`} onClick={() => setActiveTable(tab)} className={`tab ${activeTable === tab ? 'active' : ''} ${changes ? 'changed' : ''}`}><Table size={14}/><b className="tab-label">{item.name}</b>{changes > 0 && <i className="tab-change-dot" title={`${changes} pending change(s)`}/>}<span onClick={e => { e.stopPropagation(); closeTab(tab) }}><X size={13}/></span></button> : null })}</TabStrip>
           <button className={`query-tab ${queryOpen ? 'active' : ''}`} onClick={() => setQueryOpen(value => !value)}><Code size={15}/> SQL</button>
-          <button className="icon-button" onClick={() => setConnectionOpen(true)}><Plus size={17}/></button>
+          <button className="icon-button" onClick={onNewConnection}><Plus size={17}/></button>
         </div>
         {activeTable ? <>
           <header className="content-header">
@@ -570,8 +687,8 @@ export default function App() {
       </section>
     </div>
     {error && <Toast message={error} onClose={() => setError('')}/>} 
-    {connectionOpen && <ConnectionModal onSQLite={() => connect('file')} onPostgres={connectPostgres} onSaved={connectSaved} onClose={() => setConnectionOpen(false)}/>} 
-    {guardedAction && <UnsavedModal title={guardedAction.title} message={guardedAction.message} count={(draftsByTable[guardedAction.table]?.present ?? []).length} onCancel={() => setGuardedAction(null)} onDiscard={async () => { const action = guardedAction; discardChanges(action.table); setGuardedAction(null); await action.run() }} onSave={async () => { const action = guardedAction; try { await saveChanges(action.table); setGuardedAction(null); await action.run() } catch { /* Keep dialog open when save fails. */ } }}/>} 
+
+    {guardedAction && <UnsavedModal title={guardedAction.title} message={guardedAction.message} count={guardedKeys.reduce((count, key) => count + (draftsByTable[key]?.present.length ?? 0), 0)} onCancel={() => setGuardedAction(null)} onDiscard={async () => { const action = guardedAction; guardedKeys.forEach(discardChanges); setGuardedAction(null); await action.run() }} onSave={async () => { const action = guardedAction; try { for (const key of guardedKeys) await saveChanges(key); setGuardedAction(null); await action.run() } catch { /* Keep dialog open when save fails. */ } }}/>}
   </div>
 }
 
@@ -651,44 +768,43 @@ function syntaxJSON(text: string) {
   })
 }
 
-function ConnectionModal({ onSQLite, onPostgres, onSaved, onClose }: { onSQLite: () => void; onPostgres: (config: PostgresConfig) => Promise<void>; onSaved: (id: string, password: string) => Promise<void>; onClose: () => void }) {
-  const [config, setConfig] = useState<PostgresConfig>({ id: '', name: 'Local PostgreSQL', host: 'localhost', port: 5432, user: 'postgres', password: '', database: 'postgres', sslMode: 'prefer', readOnly: false, saveConnection: true, savePassword: true })
+function ConnectionModal({ config, setConfig, saved, busy, onRemove, onSQLite, onPostgres, onSaved, onClose }: SavedConnectionsProps & { config: PostgresConfig; setConfig: React.Dispatch<React.SetStateAction<PostgresConfig>>; onSQLite: () => void; onPostgres: (config: PostgresConfig) => Promise<void>; onClose: () => void }) {
   const [submitting, setSubmitting] = useState(false)
-  const [saved, setSaved] = useState<SavedConnection[]>([])
+  const [testing, setTesting] = useState(false)
+  const [feedback, setFeedback] = useState<{ kind: 'success' | 'error'; message: string } | null>(null)
+  const feedbackRef = useRef<HTMLDivElement>(null)
+  const pending = busy || submitting || testing
   const update = <K extends keyof PostgresConfig>(key: K, value: PostgresConfig[K]) => setConfig(current => ({ ...current, [key]: value }))
 
-  useEffect(() => { api().ListSavedConnections().then(setSaved).catch(() => setSaved([])) }, [])
+  useEffect(() => { setFeedback(null) }, [config])
+  useEffect(() => { feedbackRef.current?.scrollIntoView({ block: 'nearest' }) }, [feedback])
 
-  async function submit(event: React.FormEvent) {
-    event.preventDefault(); setSubmitting(true)
-    try { await onPostgres(config) } catch { /* Parent displays the connection error. */ }
-    finally { setSubmitting(false) }
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (pending) return
+    const isTest = (event.nativeEvent as SubmitEvent).submitter?.getAttribute('value') === 'test'
+    setFeedback(null)
+    if (isTest) setTesting(true)
+    else setSubmitting(true)
+    try {
+      if (isTest) {
+        await api().TestPostgresConnection(config)
+        setFeedback({ kind: 'success', message: 'Connection successful. Ready to connect.' })
+      } else await onPostgres(config)
+    } catch (e) { setFeedback({ kind: 'error', message: String(e).replace(/^Error:\s*/i, '') }) }
+    finally { setSubmitting(false); setTesting(false) }
   }
 
-  async function openSaved(profile: SavedConnection) {
-    if (profile.driver === 'PostgreSQL' && !profile.hasPassword) {
-      setConfig(current => ({ ...current, id: profile.id, name: profile.name, host: profile.host ?? 'localhost', port: profile.port ?? 5432, user: profile.user ?? 'postgres', database: profile.database ?? 'postgres', sslMode: (profile.sslMode as PostgresConfig['sslMode']) ?? 'prefer', readOnly: profile.readOnly, saveConnection: true, savePassword: true }))
-      return
-    }
-    setSubmitting(true)
-    try { await onSaved(profile.id, '') } catch { /* Parent displays the connection error. */ }
-    finally { setSubmitting(false) }
-  }
-
-  async function removeSaved(event: React.MouseEvent, id: string) {
-    event.stopPropagation()
-    try { await api().DeleteSavedConnection(id); setSaved(current => current.filter(item => item.id !== id)) } catch { /* Keep the item if deletion fails. */ }
-  }
-
-  return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
+  return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !pending) onClose() }}>
     <section className="connection-modal" role="dialog" aria-modal="true" aria-label="New database connection">
-      <header><div className="modal-mark"><Database size={19}/></div><div><h3>New connection</h3><p>Connect securely to your database</p></div><button className="icon-button" onClick={onClose}><X size={17}/></button></header>
-      {saved.length > 0 && <div className="saved-connections"><div className="saved-title"><span>Saved connections</span><em>{saved.length}</em></div><div className="saved-list">{saved.map(profile => <button key={profile.id} className="saved-row" onClick={() => openSaved(profile)} disabled={submitting}><span className={`kind-logo ${profile.driver === 'PostgreSQL' ? 'postgres' : 'sqlite'}`}>{profile.driver === 'PostgreSQL' ? 'PG' : 'SQ'}</span><span><b>{profile.name}</b><small>{profile.driver === 'PostgreSQL' ? `${profile.host}:${profile.port}/${profile.database}` : profile.path}</small></span>{profile.hasPassword && <Key size={13}/>}<i onClick={event => void removeSaved(event, profile.id)}><X size={13}/></i></button>)}</div></div>}
+      <header><div className="modal-mark"><Database size={19}/></div><div><h3>New connection</h3><p>Connect securely to your database</p></div><button className="icon-button" aria-label="Close connection form" disabled={pending} onClick={onClose}><X size={17}/></button></header>
+      <SavedConnections saved={saved} busy={pending} onSaved={onSaved} onRemove={onRemove}/>
       <div className="connection-kinds">
-        <button className="kind-card" onClick={onSQLite}><span className="kind-logo sqlite">SQ</span><span><b>SQLite</b><small>Open a local database file</small></span><ChevronRight size={15}/></button>
+        <button className="kind-card" onClick={onSQLite} disabled={pending}><span className="kind-logo sqlite">SQ</span><span><b>SQLite</b><small>Open a local database file</small></span><ChevronRight size={15}/></button>
         <div className="kind-card active"><span className="kind-logo postgres">PG</span><span><b>PostgreSQL</b><small>Host and credentials</small></span><Check size={15}/></div>
       </div>
       <form onSubmit={submit}>
+        <fieldset disabled={pending}>
         <div className="form-grid">
           <label className="span-2"><span>Connection name</span><input required value={config.name} onChange={e => update('name', e.target.value)} placeholder="Production database"/></label>
           <label className="span-2"><span>Host</span><input required value={config.host} onChange={e => update('host', e.target.value)} placeholder="localhost" autoFocus/></label>
@@ -699,7 +815,9 @@ function ConnectionModal({ onSQLite, onPostgres, onSaved, onClose }: { onSQLite:
           <label><span>Password</span><input type="password" value={config.password} onChange={e => update('password', e.target.value)} placeholder="Optional" autoComplete="current-password"/></label>
         </div>
         <div className="connection-options"><label><input type="checkbox" checked={config.saveConnection} onChange={e => update('saveConnection', e.target.checked)}/><span>Save connection</span></label><label className={!config.saveConnection ? 'disabled' : ''}><input type="checkbox" checked={config.savePassword} disabled={!config.saveConnection} onChange={e => update('savePassword', e.target.checked)}/><span>Save password securely</span></label><label><input type="checkbox" checked={config.readOnly} onChange={e => update('readOnly', e.target.checked)}/><span>Read-only</span></label></div>
-        <footer><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="submit" className="primary" disabled={submitting}>{submitting ? <Refresh size={15} className="spin"/> : <Database size={15}/>} {submitting ? 'Connecting…' : 'Connect'}</button></footer>
+        </fieldset>
+        {feedback && <div ref={feedbackRef} className={`connection-feedback ${feedback.kind}`} role={feedback.kind === 'error' ? 'alert' : 'status'}>{feedback.kind === 'success' ? <Check size={15}/> : <Alert size={15}/>}<span>{feedback.message}</span></div>}
+        <footer><button type="button" className="secondary" onClick={onClose} disabled={pending}>Cancel</button><button type="submit" name="action" value="connect" className="primary" disabled={pending}>{submitting ? <Refresh size={15} className="spin"/> : <Database size={15}/>} {submitting ? 'Connecting…' : 'Connect'}</button><button type="submit" name="action" value="test" className="secondary test-connection" disabled={pending}>{testing ? <Refresh size={15} className="spin"/> : <Play size={15}/>} {testing ? 'Testing…' : 'Test connection'}</button></footer>
       </form>
     </section>
   </div>
