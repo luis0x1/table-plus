@@ -1,8 +1,9 @@
-import type { AppConfig, SidebarPreferences, ColumnInfo, ConnectionStatus, PostgresConfig, QueryResult, RowOperation, SavedConnection, TableData, TableSummary } from './types'
+import type { AppConfig, AppearancePreferences, SidebarPreferences, ColumnInfo, ConnectionStatus, PostgresConfig, QueryResult, RowOperation, SavedConnection, TableData, TableSummary } from './types'
 
 type Backend = {
   LoadAppConfig(legacy: SidebarPreferences): Promise<AppConfig>
   SaveSidebarPreferences(preferences: SidebarPreferences): Promise<void>
+  SaveAppearancePreferences(preferences: AppearancePreferences): Promise<void>
   ListDatabaseSessions(): Promise<ConnectionStatus[]>
   OpenPostgresSession(config: PostgresConfig): Promise<ConnectionStatus>
   OpenSavedSession(id: string, password: string): Promise<ConnectionStatus>
@@ -12,6 +13,7 @@ type Backend = {
   ListDatabases(id: string): Promise<string[]>
   OpenDatabase(id: string, database: string): Promise<ConnectionStatus>
   SessionListTables(id: string): Promise<TableSummary[]>
+  SessionCountTableRows(id: string, schema: string, table: string): Promise<number>
   SessionGetTableSchema(id: string, schema: string, table: string): Promise<ColumnInfo[]>
   SessionGetTableData(id: string, schema: string, table: string, limit: number, offset: number, filter: string, sortColumn: string, sortDirection: string): Promise<TableData>
   SessionExecuteQuery(id: string, query: string): Promise<QueryResult>
@@ -27,6 +29,7 @@ type Backend = {
   DeleteSavedConnection(id: string): Promise<void>
   Disconnect(): Promise<void>
   ListTables(): Promise<TableSummary[]>
+  CountTableRows(schema: string, table: string): Promise<number>
   GetTableSchema(schema: string, table: string): Promise<ColumnInfo[]>
   GetTableData(schema: string, table: string, limit: number, offset: number, filter: string, sortColumn: string, sortDirection: string): Promise<TableData>
   ExecuteQuery(query: string): Promise<QueryResult>
@@ -58,6 +61,16 @@ const demoRows = [
 
 let mockConnected = false
 let mockSessions: ConnectionStatus[] = []
+const defaultAppearance: AppearancePreferences = { fontSize: 17, fontFamily: 'system' }
+function mockAppConfig(legacy: SidebarPreferences): AppConfig {
+  const stored = localStorage.getItem('querynest:preview-config')
+  if (!stored) return { version: 1, sidebars: legacy, appearance: defaultAppearance }
+  const parsed = JSON.parse(stored) as Partial<AppConfig>
+  return { version: 1, sidebars: parsed.sidebars ?? legacy, appearance: { ...defaultAppearance, ...parsed.appearance } }
+}
+function saveMockConfig(config: AppConfig) {
+  localStorage.setItem('querynest:preview-config', JSON.stringify(config))
+}
 function addMockSession(status: ConnectionStatus) {
   const existing = mockSessions.find(item => item.driver === status.driver && item.path === status.path && item.readOnly === status.readOnly)
   if (existing) return existing
@@ -72,14 +85,15 @@ function mockSession(id: string) {
 }
 const mock: Backend = {
   async LoadAppConfig(legacy) {
-    const stored = localStorage.getItem('querynest:preview-config')
-    if (stored) return JSON.parse(stored)
-    const config = { version: 1, sidebars: legacy }
-    localStorage.setItem('querynest:preview-config', JSON.stringify(config))
+    const config = mockAppConfig(legacy)
+    saveMockConfig(config)
     return config
   },
   async SaveSidebarPreferences(preferences) {
-    localStorage.setItem('querynest:preview-config', JSON.stringify({ version: 1, sidebars: preferences }))
+    saveMockConfig({ ...mockAppConfig(preferences), sidebars: preferences })
+  },
+  async SaveAppearancePreferences(preferences) {
+    saveMockConfig({ ...mockAppConfig({ databases: 1, tables: 1 }), appearance: preferences })
   },
   async ListDatabaseSessions() { return [...mockSessions] },
   async OpenPostgresSession(config) { return addMockSession(await this.ConnectPostgres(config)) },
@@ -90,6 +104,7 @@ const mock: Backend = {
   async ListDatabases(id) { const session = mockSession(id); return session.driver === 'PostgreSQL' ? [...new Set([session.database, 'analytics', 'inventory', 'postgres'])] : [session.database] },
   async OpenDatabase(id, database) { const session = mockSession(id); return addMockSession({ ...session, database, path: session.path.slice(0, session.path.lastIndexOf('/') + 1) + database }) },
   async SessionListTables(id) { mockSession(id); return this.ListTables() },
+  async SessionCountTableRows(id, schema, table) { mockSession(id); return this.CountTableRows(schema, table) },
   async SessionGetTableSchema(id, schema, table) { mockSession(id); return this.GetTableSchema(schema, table) },
   async SessionGetTableData(id, ...args) { mockSession(id); return this.GetTableData(...args) },
   async SessionExecuteQuery(id, query) { mockSession(id); return this.ExecuteQuery(query) },
@@ -104,7 +119,8 @@ const mock: Backend = {
   async ConnectSavedConnection() { mockConnected = true; return this.GetStatus() },
   async DeleteSavedConnection() {},
   async Disconnect() { mockConnected = false },
-  async ListTables() { return [{ schema: 'public', name: 'customers', type: 'table', rows: 8 }, { schema: 'public', name: 'orders', type: 'table', rows: 5 }, { schema: 'public', name: 'active_customers', type: 'view', rows: 5 }] },
+  async ListTables() { return [{ schema: 'public', name: 'customers', type: 'table', rows: -1 }, { schema: 'public', name: 'orders', type: 'table', rows: -1 }, { schema: 'public', name: 'active_customers', type: 'view', rows: -1 }] },
+  async CountTableRows(_schema, table) { return table === 'customers' ? 8 : 5 },
   async GetTableSchema(_schema, table) {
     const columns = table === 'orders'
       ? [['id', 'INTEGER'], ['customer_id', 'INTEGER'], ['total', 'REAL'], ['currency', 'TEXT'], ['status', 'TEXT'], ['ordered_at', 'TEXT']]
@@ -137,6 +153,7 @@ export function databaseApi(id: string) {
   const backend = api()
   return {
     ListTables: () => backend.SessionListTables(id),
+    CountTableRows: (schema: string, table: string) => backend.SessionCountTableRows(id, schema, table),
     GetTableSchema: (schema: string, table: string) => backend.SessionGetTableSchema(id, schema, table),
     GetTableData: (schema: string, table: string, limit: number, offset: number, filter: string, sortColumn: string, sortDirection: string) => backend.SessionGetTableData(id, schema, table, limit, offset, filter, sortColumn, sortDirection),
     ExecuteQuery: (query: string) => backend.SessionExecuteQuery(id, query),

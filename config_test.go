@@ -15,7 +15,7 @@ func TestAppConfigMigratesAndRestoresSidebarSizes(t *testing.T) {
 	app.configPath = filepath.Join(t.TempDir(), ".querynet", "config.json")
 	legacy := SidebarPreferences{Databases: 1.5, Tables: 2}
 	config, err := app.LoadAppConfig(legacy)
-	if err != nil || config.Sidebars != legacy || config.Version != 1 {
+	if err != nil || config.Sidebars != legacy || config.Appearance != (AppearancePreferences{FontSize: 17, FontFamily: "system"}) || config.Version != 1 {
 		t.Fatalf("migrate preferences: %#v, %v", config, err)
 	}
 	if runtime.GOOS != "windows" {
@@ -30,10 +30,14 @@ func TestAppConfigMigratesAndRestoresSidebarSizes(t *testing.T) {
 	if err := app.SaveSidebarPreferences(want); err != nil {
 		t.Fatal(err)
 	}
+	wantAppearance := AppearancePreferences{FontSize: 19, FontFamily: "serif"}
+	if err := app.SaveAppearancePreferences(wantAppearance); err != nil {
+		t.Fatal(err)
+	}
 	reopened := NewApp()
 	reopened.configPath = app.configPath
 	config, err = reopened.LoadAppConfig(legacy)
-	if err != nil || config.Sidebars != want {
+	if err != nil || config.Sidebars != want || config.Appearance != wantAppearance {
 		t.Fatalf("file must override old browser preferences: %#v, %v", config, err)
 	}
 }
@@ -50,7 +54,7 @@ func TestAppConfigDefaultsAndPath(t *testing.T) {
 	}
 	app.configPath = filepath.Join(t.TempDir(), "config.json")
 	config, err := app.LoadAppConfig(SidebarPreferences{})
-	if err != nil || config.Sidebars != (SidebarPreferences{Databases: 1, Tables: 1}) {
+	if err != nil || config.Sidebars != (SidebarPreferences{Databases: 1, Tables: 1}) || config.Appearance != (AppearancePreferences{FontSize: 17, FontFamily: "system"}) {
 		t.Fatalf("incorrect defaults: %#v, %v", config, err)
 	}
 }
@@ -64,6 +68,9 @@ func TestAppConfigPreservesUnknownSettings(t *testing.T) {
 	if err := app.SaveSidebarPreferences(SidebarPreferences{Databases: 2, Tables: 2}); err != nil {
 		t.Fatal(err)
 	}
+	if err := app.SaveAppearancePreferences(AppearancePreferences{FontSize: 19, FontFamily: "humanist"}); err != nil {
+		t.Fatal(err)
+	}
 	data, err := os.ReadFile(app.configPath)
 	if err != nil {
 		t.Fatal(err)
@@ -73,8 +80,12 @@ func TestAppConfigPreservesUnknownSettings(t *testing.T) {
 		Sidebars struct {
 			Future bool `json:"future"`
 		} `json:"sidebars"`
+		Appearance struct {
+			FontSize   int    `json:"fontSize"`
+			FontFamily string `json:"fontFamily"`
+		} `json:"appearance"`
 	}
-	if err := json.Unmarshal(data, &saved); err != nil || saved.Theme != "dark" || !saved.Sidebars.Future {
+	if err := json.Unmarshal(data, &saved); err != nil || saved.Theme != "dark" || !saved.Sidebars.Future || saved.Appearance.FontSize != 19 || saved.Appearance.FontFamily != "humanist" {
 		t.Fatalf("lost unrelated settings: %s, %v", data, err)
 	}
 }
@@ -83,7 +94,7 @@ func TestAppConfigRejectsInvalidSettingsWithoutOverwriting(t *testing.T) {
 	app := NewApp()
 	app.configPath = filepath.Join(t.TempDir(), "config.json")
 	valid := SidebarPreferences{Databases: 1, Tables: 1}
-	for _, content := range []string{`{`, `null`, `[]`, `{"version":2}`, `{"sidebars":{"tables":3}}`} {
+	for _, content := range []string{`{`, `null`, `[]`, `{"version":2}`, `{"sidebars":{"tables":3}}`, `{"appearance":{"fontSize":30}}`, `{"appearance":{"fontFamily":"unknown"}}`} {
 		if err := os.WriteFile(app.configPath, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -101,6 +112,11 @@ func TestAppConfigRejectsInvalidSettingsWithoutOverwriting(t *testing.T) {
 	for _, value := range []float64{0, 2.01, math.NaN(), math.Inf(1)} {
 		if err := app.SaveSidebarPreferences(SidebarPreferences{Databases: value, Tables: 1}); err == nil {
 			t.Fatalf("accepted invalid size: %v", value)
+		}
+	}
+	for _, preferences := range []AppearancePreferences{{FontSize: 13, FontFamily: "system"}, {FontSize: 21, FontFamily: "system"}, {FontSize: 17, FontFamily: "unknown"}} {
+		if err := app.SaveAppearancePreferences(preferences); err == nil {
+			t.Fatalf("accepted invalid appearance: %#v", preferences)
 		}
 	}
 	app.configPath = filepath.Join(app.configPath, "config.json") // Parent is a file.

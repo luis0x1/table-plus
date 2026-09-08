@@ -380,6 +380,7 @@ func (a *App) ListTables() ([]TableSummary, error) {
 			_ = rows.Close()
 			return nil, err
 		}
+		item.Rows = -1
 		result = append(result, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -387,13 +388,25 @@ func (a *App) ListTables() ([]TableSummary, error) {
 		return nil, err
 	}
 	_ = rows.Close()
-	for i := range result {
-		qualified := qualifiedIdentifier(result[i].Schema, result[i].Name)
-		if err := db.QueryRow(`SELECT count(*) FROM ` + qualified).Scan(&result[i].Rows); err != nil {
-			result[i].Rows = -1
-		}
-	}
 	return result, nil
+}
+
+func (a *App) CountTableRows(schema, table string) (int64, error) {
+	db, driver, err := a.connection()
+	if err != nil {
+		return 0, err
+	}
+	if schema == "" {
+		schema = defaultSchema(driver)
+	}
+	if err := ensureTable(db, driver, schema, table); err != nil {
+		return 0, err
+	}
+	var count int64
+	if err := db.QueryRow(`SELECT count(*) FROM ` + qualifiedIdentifier(schema, table)).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count rows in %s.%s: %w", schema, table, err)
+	}
+	return count, nil
 }
 
 func (a *App) GetTableSchema(schema, table string) ([]ColumnInfo, error) {

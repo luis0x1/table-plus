@@ -57,6 +57,11 @@ func (a *App) OpenDemoSession() (ConnectionStatus, error) {
 }
 
 func (a *App) OpenPostgresSession(config PostgresConfig) (ConnectionStatus, error) {
+	var err error
+	config, err = a.restoreSavedPassword(config)
+	if err != nil {
+		return ConnectionStatus{}, err
+	}
 	return a.openSession(func(child *App) (ConnectionStatus, error) { return child.ConnectPostgres(config) })
 }
 
@@ -173,6 +178,14 @@ func (a *App) SessionListTables(id string) ([]TableSummary, error) {
 		return nil, err
 	}
 	return child.ListTables()
+}
+
+func (a *App) SessionCountTableRows(id, schema, table string) (int64, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return 0, err
+	}
+	return child.CountTableRows(schema, table)
 }
 
 func (a *App) SessionGetTableSchema(id, schema, table string) ([]ColumnInfo, error) {

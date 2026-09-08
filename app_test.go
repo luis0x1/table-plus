@@ -28,6 +28,18 @@ func TestListTablesAndSchema(t *testing.T) {
 	if len(tables) != 3 {
 		t.Fatalf("got %d objects, want 3", len(tables))
 	}
+	for _, table := range tables {
+		if table.Rows != -1 {
+			t.Fatalf("ListTables eagerly counted %s: %d", table.Name, table.Rows)
+		}
+	}
+	count, err := app.CountTableRows("main", "customers")
+	if err != nil || count != 8 {
+		t.Fatalf("count customers: got %d, %v", count, err)
+	}
+	if _, err := app.CountTableRows("main", `customers"; DROP TABLE customers; --`); err == nil {
+		t.Fatal("expected invalid table count to be rejected")
+	}
 
 	columns, err := app.GetTableSchema("main", "customers")
 	if err != nil {

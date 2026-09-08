@@ -15,9 +15,23 @@ type SidebarPreferences struct {
 	Tables    float64 `json:"tables"`
 }
 
+type AppearancePreferences struct {
+	FontSize   int    `json:"fontSize"`
+	FontFamily string `json:"fontFamily"`
+}
+
 type AppConfig struct {
-	Version  int                `json:"version"`
-	Sidebars SidebarPreferences `json:"sidebars"`
+	Version    int                   `json:"version"`
+	Sidebars   SidebarPreferences    `json:"sidebars"`
+	Appearance AppearancePreferences `json:"appearance"`
+}
+
+func defaultAppConfig() AppConfig {
+	return AppConfig{
+		Version:    1,
+		Sidebars:   SidebarPreferences{Databases: 1, Tables: 1},
+		Appearance: AppearancePreferences{FontSize: 17, FontFamily: "system"},
+	}
 }
 
 func (a *App) appConfigPath() (string, error) {
@@ -38,6 +52,18 @@ func validSidebarPreferences(p SidebarPreferences) bool {
 	return valid(p.Databases) && valid(p.Tables)
 }
 
+func validAppearancePreferences(p AppearancePreferences) bool {
+	if p.FontSize < 14 || p.FontSize > 20 {
+		return false
+	}
+	switch p.FontFamily {
+	case "system", "humanist", "serif", "mono":
+		return true
+	default:
+		return false
+	}
+}
+
 // LoadAppConfig migrates browser preferences only when the file does not exist.
 func (a *App) LoadAppConfig(legacy SidebarPreferences) (AppConfig, error) {
 	a.configMu.Lock()
@@ -53,7 +79,8 @@ func (a *App) LoadAppConfig(legacy SidebarPreferences) (AppConfig, error) {
 	if !validSidebarPreferences(legacy) {
 		legacy = SidebarPreferences{Databases: 1, Tables: 1}
 	}
-	config = AppConfig{Version: 1, Sidebars: legacy}
+	config = defaultAppConfig()
+	config.Sidebars = legacy
 	if err := writeAppConfig(path, config, nil); err != nil {
 		return AppConfig{}, err
 	}
@@ -78,8 +105,26 @@ func (a *App) SaveSidebarPreferences(preferences SidebarPreferences) error {
 	return writeAppConfig(path, config, fields)
 }
 
+func (a *App) SaveAppearancePreferences(preferences AppearancePreferences) error {
+	if !validAppearancePreferences(preferences) {
+		return errors.New("font size must be between 14 and 20 and font family must be supported")
+	}
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	path, err := a.appConfigPath()
+	if err != nil {
+		return err
+	}
+	config, fields, err := readAppConfig(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	config.Version, config.Appearance = 1, preferences
+	return writeAppConfig(path, config, fields)
+}
+
 func readAppConfig(path string) (AppConfig, map[string]json.RawMessage, error) {
-	config := AppConfig{Version: 1, Sidebars: SidebarPreferences{Databases: 1, Tables: 1}}
+	config := defaultAppConfig()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return config, nil, fmt.Errorf("read configuration: %w", err)
@@ -96,6 +141,9 @@ func readAppConfig(path string) (AppConfig, map[string]json.RawMessage, error) {
 	}
 	if !validSidebarPreferences(config.Sidebars) {
 		return config, nil, errors.New("read configuration: sidebar sizes must be between 1 and 2")
+	}
+	if !validAppearancePreferences(config.Appearance) {
+		return config, nil, errors.New("read configuration: invalid appearance settings")
 	}
 	return config, fields, nil
 }
@@ -116,6 +164,18 @@ func writeAppConfig(path string, config AppConfig, fields map[string]json.RawMes
 	sidebars["databases"], _ = json.Marshal(config.Sidebars.Databases)
 	sidebars["tables"], _ = json.Marshal(config.Sidebars.Tables)
 	fields["sidebars"], _ = json.Marshal(sidebars)
+	appearance := make(map[string]json.RawMessage)
+	if raw := fields["appearance"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &appearance); err != nil {
+			return fmt.Errorf("read appearance configuration: %w", err)
+		}
+		if appearance == nil {
+			appearance = make(map[string]json.RawMessage)
+		}
+	}
+	appearance["fontSize"], _ = json.Marshal(config.Appearance.FontSize)
+	appearance["fontFamily"], _ = json.Marshal(config.Appearance.FontFamily)
+	fields["appearance"], _ = json.Marshal(appearance)
 	fields["version"], _ = json.Marshal(config.Version)
 	data, err := json.MarshalIndent(fields, "", "  ")
 	if err != nil {

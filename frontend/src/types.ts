@@ -77,7 +77,15 @@ export interface SidebarPreferences {
   tables: number
 }
 
+export type FontFamily = 'system' | 'humanist' | 'serif' | 'mono'
+
+export interface AppearancePreferences {
+  fontSize: number
+  fontFamily: FontFamily
+}
+
 export interface AppConfig {
   version: number
   sidebars: SidebarPreferences
+  appearance: AppearancePreferences
 }

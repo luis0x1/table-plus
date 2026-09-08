@@ -64,6 +64,9 @@ func TestDatabaseSessionsIsolateReadsAndWrites(t *testing.T) {
 	if _, err := app.SessionListTables(first.ID); err == nil {
 		t.Fatal("closed session accepted a read")
 	}
+	if _, err := app.SessionCountTableRows(first.ID, "main", "customers"); err == nil {
+		t.Fatal("closed session accepted a row count")
+	}
 	if _, err := app.SessionApplyChanges(first.ID, "main", "customers", nil); err == nil {
 		t.Fatal("closed session accepted a write")
 	}

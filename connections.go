@@ -65,6 +65,30 @@ func (a *App) ConnectSavedConnection(id, password string) (ConnectionStatus, err
 	return ConnectionStatus{}, errors.New("saved connection not found")
 }
 
+// restoreSavedPassword keeps an edited saved connection usable without ever
+// sending its credential to the frontend. A password entered in the form wins.
+func (a *App) restoreSavedPassword(input PostgresConfig) (PostgresConfig, error) {
+	if strings.TrimSpace(input.ID) == "" || input.Password != "" {
+		return input, nil
+	}
+	profiles, err := a.ListSavedConnections()
+	if err != nil {
+		return input, err
+	}
+	for _, profile := range profiles {
+		if profile.ID != input.ID || !profile.HasPassword {
+			continue
+		}
+		password, err := keyring.Get(keyringService, profile.ID)
+		if err != nil {
+			return input, fmt.Errorf("read saved password: %w", err)
+		}
+		input.Password = password
+		break
+	}
+	return input, nil
+}
+
 func (a *App) DeleteSavedConnection(id string) error {
 	a.profilesMu.Lock()
 	defer a.profilesMu.Unlock()
