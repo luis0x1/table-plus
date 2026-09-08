@@ -3,6 +3,8 @@ module tableplus-lite
 go 1.25.0
 
 require (
+	gioui.org v0.10.2
+	gioui.org/x v0.10.2
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/wailsapp/wails/v2 v2.15.0
 	github.com/zalando/go-keyring v0.2.8
