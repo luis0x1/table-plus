@@ -1,4 +1,6 @@
 export interface ConnectionStatus {
+  id: string
+  database: string
   connected: boolean
   name: string
   path: string
@@ -68,4 +70,14 @@ export interface QueryResult {
   rowsAffected: number
   durationMs: number
   message: string
+}
+
+export interface SidebarPreferences {
+  databases: number
+  tables: number
+}
+
+export interface AppConfig {
+  version: number
+  sidebars: SidebarPreferences
 }

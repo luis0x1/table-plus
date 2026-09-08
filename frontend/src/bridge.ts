@@ -1,10 +1,26 @@
-import type { ColumnInfo, ConnectionStatus, PostgresConfig, QueryResult, RowOperation, SavedConnection, TableData, TableSummary } from './types'
+import type { AppConfig, SidebarPreferences, ColumnInfo, ConnectionStatus, PostgresConfig, QueryResult, RowOperation, SavedConnection, TableData, TableSummary } from './types'
 
 type Backend = {
+  LoadAppConfig(legacy: SidebarPreferences): Promise<AppConfig>
+  SaveSidebarPreferences(preferences: SidebarPreferences): Promise<void>
+  ListDatabaseSessions(): Promise<ConnectionStatus[]>
+  OpenPostgresSession(config: PostgresConfig): Promise<ConnectionStatus>
+  OpenSavedSession(id: string, password: string): Promise<ConnectionStatus>
+  ChooseSQLiteSession(): Promise<ConnectionStatus>
+  OpenDemoSession(): Promise<ConnectionStatus>
+  CloseDatabaseSession(id: string): Promise<void>
+  ListDatabases(id: string): Promise<string[]>
+  OpenDatabase(id: string, database: string): Promise<ConnectionStatus>
+  SessionListTables(id: string): Promise<TableSummary[]>
+  SessionGetTableSchema(id: string, schema: string, table: string): Promise<ColumnInfo[]>
+  SessionGetTableData(id: string, schema: string, table: string, limit: number, offset: number, filter: string, sortColumn: string, sortDirection: string): Promise<TableData>
+  SessionExecuteQuery(id: string, query: string): Promise<QueryResult>
+  SessionApplyChanges(id: string, schema: string, table: string, operations: RowOperation[]): Promise<number>
   GetStatus(): Promise<ConnectionStatus>
   ChooseSQLiteFile(): Promise<ConnectionStatus>
   ConnectSQLite(path: string): Promise<ConnectionStatus>
   ConnectPostgres(config: PostgresConfig): Promise<ConnectionStatus>
+  TestPostgresConnection(config: PostgresConfig): Promise<void>
   ConnectDemo(): Promise<ConnectionStatus>
   ListSavedConnections(): Promise<SavedConnection[]>
   ConnectSavedConnection(id: string, password: string): Promise<ConnectionStatus>
@@ -41,11 +57,48 @@ const demoRows = [
 ]
 
 let mockConnected = false
+let mockSessions: ConnectionStatus[] = []
+function addMockSession(status: ConnectionStatus) {
+  const existing = mockSessions.find(item => item.driver === status.driver && item.path === status.path && item.readOnly === status.readOnly)
+  if (existing) return existing
+  const next = { ...status, id: crypto.randomUUID() }
+  mockSessions = [...mockSessions, next]
+  return next
+}
+function mockSession(id: string) {
+  const session = mockSessions.find(item => item.id === id)
+  if (!session) throw new Error('Database session is closed.')
+  return session
+}
 const mock: Backend = {
-  async GetStatus() { return { connected: mockConnected, name: mockConnected ? 'querynest-demo' : '', path: mockConnected ? '~/querynest-demo.db' : '', driver: 'SQLite', readOnly: false } },
+  async LoadAppConfig(legacy) {
+    const stored = localStorage.getItem('querynest:preview-config')
+    if (stored) return JSON.parse(stored)
+    const config = { version: 1, sidebars: legacy }
+    localStorage.setItem('querynest:preview-config', JSON.stringify(config))
+    return config
+  },
+  async SaveSidebarPreferences(preferences) {
+    localStorage.setItem('querynest:preview-config', JSON.stringify({ version: 1, sidebars: preferences }))
+  },
+  async ListDatabaseSessions() { return [...mockSessions] },
+  async OpenPostgresSession(config) { return addMockSession(await this.ConnectPostgres(config)) },
+  async OpenSavedSession(id, password) { return addMockSession(await this.ConnectSavedConnection(id, password)) },
+  async ChooseSQLiteSession() { return addMockSession(await this.ChooseSQLiteFile()) },
+  async OpenDemoSession() { return addMockSession(await this.ConnectDemo()) },
+  async CloseDatabaseSession(id) { mockSession(id); mockSessions = mockSessions.filter(item => item.id !== id) },
+  async ListDatabases(id) { const session = mockSession(id); return session.driver === 'PostgreSQL' ? [...new Set([session.database, 'analytics', 'inventory', 'postgres'])] : [session.database] },
+  async OpenDatabase(id, database) { const session = mockSession(id); return addMockSession({ ...session, database, path: session.path.slice(0, session.path.lastIndexOf('/') + 1) + database }) },
+  async SessionListTables(id) { mockSession(id); return this.ListTables() },
+  async SessionGetTableSchema(id, schema, table) { mockSession(id); return this.GetTableSchema(schema, table) },
+  async SessionGetTableData(id, ...args) { mockSession(id); return this.GetTableData(...args) },
+  async SessionExecuteQuery(id, query) { mockSession(id); return this.ExecuteQuery(query) },
+  async SessionApplyChanges(id, schema, table, operations) { mockSession(id); return this.ApplyChanges(schema, table, operations) },
+  async GetStatus() { return { id: '', database: mockConnected ? 'querynest-demo' : '', connected: mockConnected, name: mockConnected ? 'querynest-demo' : '', path: mockConnected ? '~/querynest-demo.db' : '', driver: 'SQLite', readOnly: false } },
   async ChooseSQLiteFile() { mockConnected = true; return this.GetStatus() },
   async ConnectSQLite() { mockConnected = true; return this.GetStatus() },
-  async ConnectPostgres(config) { mockConnected = true; return { connected: true, name: config.name || config.database, path: `${config.host}:${config.port}/${config.database}`, driver: 'PostgreSQL', readOnly: config.readOnly } },
+  async ConnectPostgres(config) { mockConnected = true; return { id: '', database: config.database, connected: true, name: config.name || config.database, path: `${config.host}:${config.port}/${config.database}`, driver: 'PostgreSQL', readOnly: config.readOnly } },
+  async TestPostgresConnection() { throw new Error('Connection testing is available in the desktop app.') },
   async ConnectDemo() { mockConnected = true; return this.GetStatus() },
   async ListSavedConnections() { return [] },
   async ConnectSavedConnection() { mockConnected = true; return this.GetStatus() },
@@ -78,6 +131,17 @@ const mock: Backend = {
 
 export function api(): Backend {
   return window.go?.main?.App ?? mock
+}
+
+export function databaseApi(id: string) {
+  const backend = api()
+  return {
+    ListTables: () => backend.SessionListTables(id),
+    GetTableSchema: (schema: string, table: string) => backend.SessionGetTableSchema(id, schema, table),
+    GetTableData: (schema: string, table: string, limit: number, offset: number, filter: string, sortColumn: string, sortDirection: string) => backend.SessionGetTableData(id, schema, table, limit, offset, filter, sortColumn, sortDirection),
+    ExecuteQuery: (query: string) => backend.SessionExecuteQuery(id, query),
+    ApplyChanges: (schema: string, table: string, operations: RowOperation[]) => backend.SessionApplyChanges(id, schema, table, operations),
+  }
 }
 
 export const isDesktop = () => Boolean(window.go?.main?.App)

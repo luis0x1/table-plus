@@ -22,6 +22,22 @@ The current MVP supports SQLite and PostgreSQL in read-only mode:
 - Save all staged changes atomically with `Ctrl+S`
 - Warn before closing, refreshing, filtering, sorting, or paging away from unsaved rows
 
+## Sidebar preferences
+
+The desktop app automatically creates `~/.querynet/config.json` and remembers both sidebar widths after a drag, keyboard adjustment, or double-click reset. Existing browser-stored sidebar widths migrate on the first launch without a config file. Subsequent launches use the file.
+
+```json
+{
+  "version": 1,
+  "sidebars": {
+    "databases": 1,
+    "tables": 1
+  }
+}
+```
+
+Widths are scales from `1` (default) to `2` (double width), so they adapt to compact windows. Manual file edits take effect after restarting the app. The frontend-only preview uses browser storage. Connection profiles and passwords keep their existing storage locations.
+
 ## Requirements
 
 - Go 1.25 or newer
