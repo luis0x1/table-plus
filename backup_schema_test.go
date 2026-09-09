@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -311,5 +312,76 @@ func TestPostgresRestoreFidelity(t *testing.T) {
 	}
 	if books != 1 {
 		t.Fatalf("ON DELETE CASCADE was not restored: %d books remain", books)
+	}
+}
+
+// A SpatiaLite database looks like this to a build without the extension: the
+// table is listed, but its module is missing so it cannot be read at all.
+const injectMissingModuleTable = `
+PRAGMA writable_schema = ON;
+INSERT INTO sqlite_master (type, name, tbl_name, rootpage, sql)
+VALUES ('table', 'ElementaryGeometries', 'ElementaryGeometries', 0,
+        'CREATE VIRTUAL TABLE ElementaryGeometries USING VirtualElementary()');
+PRAGMA writable_schema = OFF;
+`
+
+func TestBackupSkipsVirtualTablesInsteadOfFailing(t *testing.T) {
+	app := openTestApp(t)
+	if _, err := app.db.Exec(injectMissingModuleTable); err != nil {
+		t.Fatalf("inject virtual table: %v", err)
+	}
+
+	preview, err := app.PreviewDatabaseBackup()
+	if err != nil {
+		t.Fatalf("one unreadable virtual table failed the whole preview: %v", err)
+	}
+	if len(preview.Skipped) != 1 {
+		t.Fatalf("skipped tables not reported: %#v", preview.Skipped)
+	}
+	if preview.Skipped[0].Name != "ElementaryGeometries" {
+		t.Fatalf("wrong table reported: %#v", preview.Skipped[0])
+	}
+	if !strings.Contains(preview.Skipped[0].Reason, "VirtualElementary") {
+		t.Fatalf("reason does not name the module: %q", preview.Skipped[0].Reason)
+	}
+	for _, table := range preview.Tables {
+		if table.Name == "ElementaryGeometries" {
+			t.Fatal("virtual table was still queued for archiving")
+		}
+	}
+
+	path := filepath.Join(t.TempDir(), "spatial.qnb")
+	if _, err := app.writeDatabaseBackup(path, 1); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	manifest, reader, err := readBackupManifest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = reader.Close()
+	for _, object := range manifest.Objects {
+		if object.Name == "ElementaryGeometries" {
+			t.Fatalf("virtual table DDL was archived and would fail on restore: %#v", object)
+		}
+	}
+
+	// The rest of the database still restores.
+	target := emptyTarget(t)
+	if _, err := target.RestoreDatabase(path); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	restored, err := target.ListTables()
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, item := range restored {
+		names[item.Name] = true
+	}
+	if names["ElementaryGeometries"] {
+		t.Fatal("restore recreated a virtual table it cannot support")
+	}
+	if !names["customers"] || !names["orders"] || !names["active_customers"] {
+		t.Fatalf("restore lost ordinary objects: %v", names)
 	}
 }

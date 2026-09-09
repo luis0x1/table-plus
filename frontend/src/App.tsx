@@ -1389,6 +1389,12 @@ function TransferModal(props: {
       <div class="transfer-content">
         <Show when={preview().path}><div class="transfer-path"><File size={14}/><span title={preview().path}>{preview().path}</span></div></Show>
         <div class="transfer-summary"><span><b>{preview().tables.length.toLocaleString()}</b> tables</span><span><b>{preview().tables.reduce((total, table) => total + table.rows, 0).toLocaleString()}</b> rows</span><Show when={preview().format}><span><b>{preview().format.toUpperCase()}</b> format</span></Show></div>
+        <Show when={preview().skipped?.length}>
+          <section class="transfer-skipped" role="alert">
+            <header><Alert size={14}/><b>{preview().skipped!.length} {preview().skipped!.length === 1 ? 'object is' : 'objects are'} not included in this backup</b></header>
+            <For each={preview().skipped}>{item => <div><code>{item.schema}.{item.name}</code><small>{item.reason}</small></div>}</For>
+          </section>
+        </Show>
         <Show when={preview().kind === 'backup'}><div class="transfer-note"><Alert size={14}/><span>Data streams into a <code>.pqnb</code> pending file with checkpoints. It becomes <code>.qnb</code> only after a complete, durable write.</span></div></Show>
         <Show when={preview().kind === 'restore'}><div class="transfer-note danger"><Alert size={14}/><span>Rows in the archived tables will be replaced. This operation runs in one transaction and cannot be undone.</span></div></Show>
         <Show when={preview().kind === 'export'}><section class="transfer-options"><b>Export format</b><div><button class={props.state.format === 'csv' ? 'active' : ''} disabled={preview().tables.length > 1} onClick={() => props.onChange({ ...props.state, format: 'csv' })}>CSV</button><button class={props.state.format === 'json' ? 'active' : ''} onClick={() => props.onChange({ ...props.state, format: 'json' })}>JSON</button></div><Show when={preview().tables.length > 1}><small>Multiple tables are exported as one JSON bundle.</small></Show></section></Show>

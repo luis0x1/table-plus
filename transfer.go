@@ -48,6 +48,14 @@ type TransferTablePreview struct {
 	Rows            int64    `json:"rows"`
 }
 
+// TransferSkippedTable names an object a backup cannot archive, so the preview
+// can say so before the user commits to the operation.
+type TransferSkippedTable struct {
+	Schema string `json:"schema"`
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
 type TransferPreview struct {
 	Kind     string                 `json:"kind"`
 	Path     string                 `json:"path"`
@@ -55,6 +63,7 @@ type TransferPreview struct {
 	Driver   string                 `json:"driver"`
 	Database string                 `json:"database"`
 	Tables   []TransferTablePreview `json:"tables"`
+	Skipped  []TransferSkippedTable `json:"skipped,omitempty"`
 }
 
 type TransferResult struct {
@@ -145,13 +154,31 @@ func previewColumns(columns []ColumnInfo) []string {
 }
 
 func (a *App) PreviewDatabaseBackup() (TransferPreview, error) {
+	db, driver, err := a.connection()
+	if err != nil {
+		return TransferPreview{}, err
+	}
 	tables, err := a.ListTables()
 	if err != nil {
 		return TransferPreview{}, fmt.Errorf("preview backup: %w", err)
 	}
-	preview := TransferPreview{Kind: "backup", Driver: a.GetStatus().Driver, Database: a.GetStatus().Database, Tables: make([]TransferTablePreview, 0)}
+	virtual := map[string]string{}
+	if driver != driverPostgres {
+		if virtual, err = sqliteVirtualTables(db); err != nil {
+			return TransferPreview{}, fmt.Errorf("preview backup: %w", err)
+		}
+	}
+	preview := TransferPreview{Kind: "backup", Driver: a.GetStatus().Driver, Database: a.GetStatus().Database, Tables: make([]TransferTablePreview, 0), Skipped: make([]TransferSkippedTable, 0)}
 	for _, table := range tables {
 		if table.Type != "table" {
+			continue
+		}
+		// A virtual table's rows come from its module, and without that module
+		// loaded it cannot even be introspected. Skipping it keeps one such table
+		// from failing the whole backup, and the preview reports every skip.
+		if module, ok := virtual[table.Name]; ok {
+			preview.Skipped = append(preview.Skipped, TransferSkippedTable{Schema: table.Schema, Name: table.Name,
+				Reason: fmt.Sprintf("virtual table provided by the SQLite module %s; its rows are derived rather than stored", module)})
 			continue
 		}
 		columns, err := a.GetTableSchema(table.Schema, table.Name)

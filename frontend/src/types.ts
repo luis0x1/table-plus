@@ -32,6 +32,12 @@ export interface TransferTablePreview {
   rows: number
 }
 
+export interface TransferSkippedTable {
+  schema: string
+  name: string
+  reason: string
+}
+
 export interface TransferPreview {
   kind: 'backup' | 'restore' | 'export' | 'import'
   path: string
@@ -39,6 +45,7 @@ export interface TransferPreview {
   driver: string
   database: string
   tables: TransferTablePreview[]
+  skipped?: TransferSkippedTable[]
 }
 
 export interface TransferResult {

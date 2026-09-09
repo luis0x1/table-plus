@@ -428,3 +428,27 @@ func postgresColumnTraits(db *sql.DB, schema, table string) (map[string]bool, bo
 	}
 	return generated, override, rows.Err()
 }
+
+var virtualTableModule = regexp.MustCompile(`(?is)^\s*create\s+virtual\s+table\s+(?:if\s+not\s+exists\s+)?\S+\s+using\s+([A-Za-z0-9_]+)`)
+
+// sqliteVirtualTables maps each virtual table to the module that provides it.
+// Their rows are produced by that module rather than stored, and a build without
+// the module cannot even read their definition, so a backup cannot archive them.
+func sqliteVirtualTables(db *sql.DB) (map[string]string, error) {
+	rows, err := db.Query(`SELECT name, sql FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("read SQLite schema: %w", err)
+	}
+	defer rows.Close()
+	modules := make(map[string]string)
+	for rows.Next() {
+		var name, ddl string
+		if err := rows.Scan(&name, &ddl); err != nil {
+			return nil, fmt.Errorf("read SQLite schema: %w", err)
+		}
+		if match := virtualTableModule.FindStringSubmatch(ddl); match != nil {
+			modules[name] = match[1]
+		}
+	}
+	return modules, rows.Err()
+}
