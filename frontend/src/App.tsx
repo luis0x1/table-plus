@@ -5,7 +5,7 @@ import TabStrip from './TabStrip'
 import DatabasePicker from './DatabasePicker'
 import DataGrid, { buildDraftGrid, type PendingOperation } from './DataGrid'
 import SqlEditor from './SqlEditor'
-import type { CompletionTable, SqlStatement } from './sql'
+import { pageQuery, planPagination, type CompletionTable, type PaginationPlan, type SqlStatement } from './sql'
 import useSidebarPreferences, { UNDO_HISTORY_RANGE } from './useSidebarPreferences'
 import SidebarResizeHandle, { useCompactSidebar, useSidebarWidth, type SidebarSizing } from './SidebarResizeHandle'
 import type { AppearancePreferences, ColumnInfo, ConnectionStatus, EditingPreferences, IndexInfo, PostgresConfig, QueryResult, SavedConnection, SavedConnectionUpdate, ScriptFile, TableData, TableRef, TableSummary, TransferPreferences, TransferPreview, TransferResult } from './types'
@@ -16,6 +16,9 @@ const PAGE_SIZE = 50
 const ROW_COUNT_CONCURRENCY = 3
 const QUICK_PAGE_ITEM_WIDTH = 70
 const MAX_NAVIGABLE_PAGES = 99_999
+// Query results page at a coarser size than table browsing: a result set is
+// usually read in bulk, and the backend caps a single read at 1000 rows anyway.
+const SCRIPT_PAGE_SIZE = 100
 const qualifiedKey = (schema: string, name: string) => `${schema}\u0000${name}`
 const tableKey = (item: TableSummary) => qualifiedKey(item.schema, item.name)
 type DraftHistory = { past: PendingOperation[][]; present: PendingOperation[]; future: PendingOperation[][] }
@@ -1145,7 +1148,24 @@ function DatabaseWorkspace(props: {
     if (!queries.length) { setError('There is no statement to run.'); return }
     const target = activeScript()
     if (!buffers[target]) return
-    setBuffers(target, 'running', true); setError('')
+    // Only a lone query can be paged; a run of several has no single window.
+    const plan = queries.length === 1 ? planPagination(queries[0]) : null
+    batch(() => {
+      setBuffers(target, 'statements', queries)
+      setBuffers(target, 'plan', plan?.pageable ? plan : null)
+    })
+    await runPage(target, 0)
+  }
+
+  async function runPage(name: string, page: number) {
+    const buffer = buffers[name]
+    if (!buffer) return
+    const plan = buffer.plan
+    const windowed = plan ? pageQuery(plan, page, SCRIPT_PAGE_SIZE) : null
+    if (plan && !windowed) return
+    const queries = windowed ? [windowed] : (unwrap(buffer.statements) as string[])
+    if (!queries.length) return
+    setBuffers(name, 'running', true); setError('')
     try {
       let result: QueryResult | null = null
       for (const [position, statement] of queries.entries()) {
@@ -1153,9 +1173,9 @@ function DatabaseWorkspace(props: {
         catch (e) { throw new Error(`statement ${position + 1} of ${queries.length}: ${String(e).replace(/^Error:\s*/i, '')}`) }
       }
       if (result && queries.length > 1) result = { ...result, message: `${queries.length} statements · ${result.message}` }
-      if (buffers[target]) setBuffers(target, 'result', result)
+      if (buffers[name]) batch(() => { setBuffers(name, 'result', result); setBuffers(name, 'page', page) })
     } catch (e) { setError(String(e)) }
-    finally { if (buffers[target]) setBuffers(target, 'running', false) }
+    finally { if (buffers[name]) setBuffers(name, 'running', false) }
   }
 
   const historyLimit = () => props.editingPreferences.undoHistoryLimit
@@ -1485,6 +1505,9 @@ function DatabaseWorkspace(props: {
             dirty={scriptDirty()}
             result={buffers[activeScript()]?.result ?? null}
             running={buffers[activeScript()]?.running ?? false}
+            page={buffers[activeScript()]?.page ?? 0}
+            pageable={Boolean(buffers[activeScript()]?.plan)}
+            onPage={page => void runPage(activeScript(), page)}
             tables={completionTables()}
             onNeedColumns={name => void loadColumnsFor(name)}
             caret={buffers[activeScript()]!.caret}
@@ -1626,10 +1649,15 @@ type ScriptBuffer = {
   editedAt: number
   /** A bumped nonce tells the editor to restore this caret. */
   caret: { start: number; end: number; nonce: number }
+  /** What the last run covered, so a page can re-run it. */
+  statements: string[]
+  /** Null when the query cannot be paged without changing its meaning. */
+  plan: PaginationPlan | null
+  page: number
 }
 
 const newScriptBuffer = (text: string): ScriptBuffer =>
-  ({ text, saved: text, result: null, running: false, past: [], future: [], editedAt: 0, caret: { start: 0, end: 0, nonce: 0 } })
+  ({ text, saved: text, result: null, running: false, past: [], future: [], editedAt: 0, caret: { start: 0, end: 0, nonce: 0 }, statements: [], plan: null, page: 0 })
 
 /**
  * ScriptPanel is the whole editing surface for one script: its own header with
@@ -1643,6 +1671,9 @@ function ScriptPanel(props: {
   dirty: boolean
   result: QueryResult | null
   running: boolean
+  page: number
+  pageable: boolean
+  onPage: (page: number) => void
   tables: CompletionTable[]
   onNeedColumns: (table: string) => void
   caret: { start: number; end: number; nonce: number }
@@ -1672,7 +1703,21 @@ function ScriptPanel(props: {
       <Show when={props.result} fallback={<section class="script-results empty"><div class="result-placeholder"><Play size={20}/><span>Run a statement to see its rows</span></div></section>}>{result =>
         <section class="script-results">
           <div class="result-meta"><Check size={13}/>{result().message}<span>{result().durationMs} ms</span></div>
-          <DataGrid data={result()} compact/>
+          <DataGrid data={result()} compact rowOffset={props.pageable ? props.page * SCRIPT_PAGE_SIZE : 0}/>
+          <footer class="script-pagination">
+            <Show when={props.pageable} fallback={
+              <span class="script-page-note">{result().rows.length >= 1000 ? 'First 1000 rows. Add a LIMIT, or run one query on its own, to page through the rest.' : `${result().rows.length.toLocaleString()} rows`}</span>
+            }>
+              <span>{result().rows.length
+                ? `${(props.page * SCRIPT_PAGE_SIZE + 1).toLocaleString()}–${(props.page * SCRIPT_PAGE_SIZE + result().rows.length).toLocaleString()}`
+                : 'No more rows'}</span>
+              <div class="page-controls">
+                <button aria-label="Previous page" disabled={props.page === 0 || props.running} onClick={() => props.onPage(props.page - 1)}><ChevronRight size={14} class="flip"/></button>
+                <span>Page {props.page + 1}</span>
+                <button aria-label="Next page" disabled={props.running || result().rows.length < SCRIPT_PAGE_SIZE} onClick={() => props.onPage(props.page + 1)}><ChevronRight size={14}/></button>
+              </div>
+            </Show>
+          </footer>
         </section>
       }</Show>
     </div>

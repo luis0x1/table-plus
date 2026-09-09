@@ -341,3 +341,126 @@ export function sqlCompletions(context: CompletionContext, tables: CompletionTab
     .slice(0, limit)
     .map(entry => entry.item)
 }
+
+export type PaginationPlan = {
+  /** Whether a window can be injected without changing what the query means. */
+  pageable: boolean
+  reason: string
+  /** The query with its outermost LIMIT and OFFSET removed. */
+  base: string
+  /** Rows the writer's own LIMIT allows, when they wrote one. */
+  userLimit: number | null
+  userOffset: number
+}
+
+const pageableLeading = new Set(['select', 'with', 'table', 'values'])
+
+function readInteger(text: string, token: SqlToken | undefined): number | null {
+  if (!token || token.type !== 'number') return null
+  const value = Number(text.slice(token.start, token.end))
+  return Number.isInteger(value) && value >= 0 ? value : null
+}
+
+// A count is only a plain number if nothing continues it. `LIMIT 2+3` reads as
+// 2 followed by `+3`, and removing just the 2 would leave broken SQL behind.
+const clauseEnders = new Set([';', ')', ','])
+function endsClause(text: string, token: SqlToken | undefined, ...allowedKeywords: string[]): boolean {
+  if (!token) return true
+  const word = text.slice(token.start, token.end)
+  if (token.type === 'operator') return clauseEnders.has(word)
+  if (token.type === 'keyword' || token.type === 'plain') return allowedKeywords.includes(word.toLowerCase())
+  return false
+}
+
+/**
+ * planPagination finds the query's own LIMIT and OFFSET so a page can be taken
+ * without changing what the query means.
+ *
+ * Only clauses at paren depth zero count. A LIMIT inside a subquery, a CTE body
+ * or a scalar subquery belongs to that subquery and must be left exactly as it
+ * is; rewriting it would change the result rather than page it.
+ */
+export function planPagination(body: string): PaginationPlan {
+  const unusable = (reason: string): PaginationPlan => ({ pageable: false, reason, base: body, userLimit: null, userOffset: 0 })
+  const { tokens } = scanSql(body)
+  const code = tokens.filter(token => token.type !== 'comment')
+  const first = code[0]
+  if (!first) return unusable('there is nothing to run')
+  if (!pageableLeading.has(body.slice(first.start, first.end).toLowerCase())) return unusable('only SELECT and WITH queries can be paged')
+
+  let depth = 0
+  let limitAt = -1
+  let offsetAt = -1
+  for (let index = 0; index < code.length; index++) {
+    const token = code[index]
+    const text = body.slice(token.start, token.end)
+    if (token.type === 'operator') {
+      if (text === '(') depth++
+      else if (text === ')') depth--
+      continue
+    }
+    if (depth !== 0 || token.type !== 'keyword') continue
+    const word = text.toLowerCase()
+    // The last one at this level wins, which is also the one a compound query
+    // such as UNION applies to the whole of.
+    if (word === 'limit') limitAt = index
+    else if (word === 'offset') offsetAt = index
+  }
+
+  let userLimit: number | null = null
+  let userOffset = 0
+  const cuts: { start: number; end: number }[] = []
+
+  if (limitAt >= 0) {
+    const firstValue = code[limitAt + 1]
+    const separator = code[limitAt + 2]
+    const secondValue = code[limitAt + 3]
+    if (firstValue?.type === 'keyword' && body.slice(firstValue.start, firstValue.end).toLowerCase() === 'all') {
+      cuts.push({ start: code[limitAt].start, end: firstValue.end })
+    } else if (separator && body.slice(separator.start, separator.end) === ',') {
+      // SQLite's LIMIT <offset>, <count>.
+      const skip = readInteger(body, firstValue)
+      const take = readInteger(body, secondValue)
+      if (skip === null || take === null || !endsClause(body, code[limitAt + 4], 'offset')) return unusable('this LIMIT is not a plain number')
+      userOffset = skip
+      userLimit = take
+      cuts.push({ start: code[limitAt].start, end: secondValue!.end })
+    } else {
+      const take = readInteger(body, firstValue)
+      if (take === null || !endsClause(body, separator, 'offset')) return unusable('this LIMIT is not a plain number')
+      userLimit = take
+      cuts.push({ start: code[limitAt].start, end: firstValue!.end })
+    }
+  }
+
+  if (offsetAt >= 0) {
+    const value = code[offsetAt + 1]
+    const skip = readInteger(body, value)
+    const trailing = code[offsetAt + 2]
+    // ROW and ROWS are noise words the standard allows after an OFFSET count.
+    const isUnit = Boolean(trailing) && /^rows?$/i.test(body.slice(trailing!.start, trailing!.end))
+    if (skip === null || !endsClause(body, isUnit ? code[offsetAt + 3] : trailing, 'limit')) return unusable('this OFFSET is not a plain number')
+    // An explicit OFFSET wins over the one folded into a comma LIMIT.
+    userOffset = skip
+    cuts.push({ start: code[offsetAt].start, end: isUnit ? trailing!.end : value!.end })
+  }
+
+  // Cutting from the end keeps the earlier offsets valid.
+  let base = body
+  for (const cut of [...cuts].sort((a, b) => b.start - a.start)) base = base.slice(0, cut.start) + base.slice(cut.end)
+  base = base.replace(/\s*;\s*$/, '').trimEnd()
+  if (!base) return unusable('there is nothing to run')
+  return { pageable: true, reason: '', base, userLimit, userOffset }
+}
+
+/**
+ * pageQuery builds the SQL for one page, or null once the page falls outside
+ * the window the writer's own LIMIT allows.
+ */
+export function pageQuery(plan: PaginationPlan, page: number, size: number): string | null {
+  if (!plan.pageable || page < 0 || size <= 0) return null
+  const skipped = page * size
+  const take = plan.userLimit === null ? size : Math.min(size, plan.userLimit - skipped)
+  if (take <= 0) return null
+  return `${plan.base} LIMIT ${take} OFFSET ${plan.userOffset + skipped}`
+}

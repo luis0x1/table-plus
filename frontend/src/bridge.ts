@@ -248,7 +248,19 @@ const mock: Backend = {
     }
     return { columns, rows: rows.slice(offset, offset + limit), total: rows.length, durationMs: 4 }
   },
-  async ExecuteQuery() { return { columns: ['status', 'count'], rows: [['active', 5], ['invited', 2], ['suspended', 1]], rowsAffected: 3, durationMs: 7, message: 'Returned 3 row(s)' } },
+  async ExecuteQuery(query) {
+    // The preview honours LIMIT and OFFSET over a synthetic result so paging
+    // behaves the way it does against a real database.
+    const total = 1234
+    // The desktop backend caps one read at 1000 rows; the preview matches it.
+    const limit = Math.min(1000, Number(/\blimit\s+(\d+)/i.exec(query)?.[1] ?? total))
+    const offset = Number(/\boffset\s+(\d+)/i.exec(query)?.[1] ?? 0)
+    const rows = Array.from({ length: Math.max(0, Math.min(limit, total - offset)) }, (_, index) => {
+      const n = offset + index + 1
+      return [`row-${n}`, n]
+    })
+    return { columns: ['label', 'n'], rows, rowsAffected: rows.length, durationMs: 7, message: `Returned ${rows.length} row(s)` }
+  },
   async UpdateCell() {},
   async ApplyChanges(_schema, _table, operations) { return operations.length },
 }

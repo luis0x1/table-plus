@@ -299,6 +299,9 @@ kbd { padding: 1px 4px; border: 1px solid #2c323a; border-radius: 4px; color: #5
 .script-results { flex: 1 1 45%; min-height: 0; position: relative; display: flex; flex-direction: column; padding-top: 27px; border-top: 1px solid #272d34; background: #0f1216; }
 .script-results.empty { flex: 0 0 92px; }
 .script-results .grid-scroll { flex: 1; min-height: 0; height: auto; }
+.script-pagination { height: 31px; flex: 0 0 31px; padding: 0 11px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid #22282f; color: #67717d; background: #101318; font-size: .5625rem; }
+.script-page-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.script-pagination .page-controls { display: flex; align-items: center; gap: 5px; }
 .script-tab > svg { color: #8f7cde; }
 .query-panel.standalone { flex: 1; height: auto; border-top: 0; }
 .query-panel { flex: 0 0 298px; height: 298px; display: flex; flex-direction: column; border-top: 1px solid #303640; background: #101318; box-shadow: 0 -10px 30px rgba(0,0,0,.17); }
