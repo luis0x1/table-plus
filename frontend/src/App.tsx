@@ -5,6 +5,7 @@ import TabStrip from './TabStrip'
 import DatabasePicker from './DatabasePicker'
 import DataGrid, { buildDraftGrid, type PendingOperation } from './DataGrid'
 import SqlEditor from './SqlEditor'
+import type { CompletionTable } from './sql'
 import useSidebarPreferences, { UNDO_HISTORY_RANGE } from './useSidebarPreferences'
 import SidebarResizeHandle, { useCompactSidebar, useSidebarWidth, type SidebarSizing } from './SidebarResizeHandle'
 import type { AppearancePreferences, ColumnInfo, ConnectionStatus, EditingPreferences, IndexInfo, PostgresConfig, QueryResult, SavedConnection, SavedConnectionUpdate, ScriptFile, TableData, TableRef, TableSummary, TransferPreferences, TransferPreview, TransferResult } from './types'
@@ -956,6 +957,24 @@ function DatabaseWorkspace(props: {
     guardUnsaved(key, 'Change sorting?', 'Sorting may replace rows that contain unsaved changes.', () => changeSortNow(key, column))
   }
 
+  const [columnCache, setColumnCache] = createStore<Record<string, string[]>>({})
+  const completionTables = createMemo<CompletionTable[]>(() => tables().map(item => {
+    const key = tableKey(item)
+    return { schema: item.schema, name: item.name, columns: tabStates[key]?.schema.map(column => column.name) ?? columnCache[key] ?? [] }
+  }))
+
+  async function loadColumnsFor(name: string) {
+    const item = tables().find(table => table.name.toLowerCase() === name.toLowerCase())
+    if (!item) return
+    const key = tableKey(item)
+    if (columnCache[key]) return
+    setColumnCache(key, [])
+    // Completion is best effort: a table that cannot be introspected simply
+    // offers no columns rather than surfacing an error mid-keystroke.
+    try { setColumnCache(key, (await db.GetTableSchema(item.schema, item.name)).map(column => column.name)) }
+    catch { /* leave the empty entry so the fetch is not retried on every keystroke */ }
+  }
+
   const scriptDirty = () => Boolean(activeScript()) && query() !== savedScript()
   const filteredScripts = createMemo(() => scripts().filter(script => script.name.toLowerCase().includes(sidebarFilter().toLowerCase())))
 
@@ -1375,6 +1394,8 @@ function DatabaseWorkspace(props: {
                 setQuery={setQuery}
                 result={queryResult()}
                 running={queryRunning()}
+                tables={completionTables()}
+                onNeedColumns={name => void loadColumnsFor(name)}
                 scriptName={activeScript()}
                 dirty={scriptDirty()}
                 onSave={() => void saveScript().catch(() => {})}
@@ -1393,6 +1414,8 @@ function DatabaseWorkspace(props: {
               setQuery={setQuery}
               result={queryResult()}
               running={queryRunning()}
+              tables={completionTables()}
+              onNeedColumns={name => void loadColumnsFor(name)}
               scriptName={activeScript()}
               dirty={scriptDirty()}
               standalone
@@ -1519,14 +1542,14 @@ function SchemaView(props: { schema: ColumnInfo[]; indexes: IndexInfo[]; error: 
   </div>
 }
 
-function QueryPanel(props: { query: string; setQuery: (value: string) => void; result: QueryResult | null; running: boolean; scriptName: string; dirty: boolean; standalone?: boolean; onSave: () => void; onRun: (statements: string[]) => void; onClose: () => void }) {
+function QueryPanel(props: { query: string; setQuery: (value: string) => void; result: QueryResult | null; running: boolean; scriptName: string; dirty: boolean; standalone?: boolean; tables: CompletionTable[]; onNeedColumns: (table: string) => void; onSave: () => void; onRun: (statements: string[]) => void; onClose: () => void }) {
   return <section class={`query-panel ${props.standalone ? 'standalone' : ''}`}>
     <div class="query-header">
       <div><Code size={15}/><b>{props.scriptName ? props.scriptName.replace(/\.sql$/i, '') : 'SQL Query'}</b><Show when={props.dirty}><i class="script-dirty" title="Unsaved changes"/></Show><span>Read-only</span></div>
       <div><Show when={props.scriptName}><button class="secondary query-save" disabled={!props.dirty} onClick={props.onSave}><Save size={14}/> Save<kbd>Ctrl S</kbd></button></Show><span class="shortcut">⌘ ↵ to run</span><button class="icon-button" onClick={props.onClose}><X size={15}/></button></div>
     </div>
     <div class="query-workspace">
-      <SqlEditor value={props.query} running={props.running} onInput={props.setQuery} onRun={props.onRun} onSave={props.scriptName ? props.onSave : undefined}/>
+      <SqlEditor value={props.query} running={props.running} tables={props.tables} onNeedColumns={props.onNeedColumns} onInput={props.setQuery} onRun={props.onRun} onSave={props.scriptName ? props.onSave : undefined}/>
       <div class="query-results"><Show when={props.result} fallback={<div class="result-placeholder"><Play size={20}/><span>Run the query to see results</span></div>}>{result => <><div class="result-meta"><Check size={13}/>{result().message}<span>{result().durationMs} ms</span></div><DataGrid data={result()} compact/></>}</Show></div>
     </div>
   </section>

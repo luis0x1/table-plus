@@ -202,3 +202,142 @@ export function summarizeStatement(body: string, limit = 46): string {
   if (!collapsed) return '(comment only)'
   return collapsed.length > limit ? collapsed.slice(0, limit - 1).trimEnd() + '…' : collapsed
 }
+
+export type CompletionKind = 'keyword' | 'table' | 'column'
+
+export type Completion = { label: string; detail: string; kind: CompletionKind }
+
+export type CompletionTable = { schema: string; name: string; columns: string[] }
+
+export type CompletionContext = {
+  /** The word under the caret, which the accepted suggestion replaces whole. */
+  prefix: string
+  start: number
+  end: number
+  /** The table or alias before a dot, when the caret follows one. */
+  qualifier: string
+  wants: CompletionKind | 'any'
+  statement?: SqlStatement
+}
+
+const identifierChar = /[A-Za-z0-9_]/
+// After these, a name is a relation rather than a column.
+const relationKeywords = new Set(['from', 'join', 'into', 'update', 'table'])
+
+/**
+ * tableAliases maps the aliases a statement introduces back to their tables, so
+ * `c.` after `FROM customers c` can offer that table's columns.
+ */
+export function tableAliases(statement: string): Record<string, string> {
+  const { tokens } = scanSql(statement)
+  const words = tokens.filter(token => token.type === 'keyword' || token.type === 'plain' || token.type === 'quoted')
+  const unquote = (value: string) => /^["`[]/.test(value) ? value.slice(1, -1) : value
+  const aliases: Record<string, string> = {}
+  for (let index = 0; index < words.length; index++) {
+    const word = statement.slice(words[index].start, words[index].end).toLowerCase()
+    if (words[index].type !== 'keyword' || (word !== 'from' && word !== 'join' && word !== 'update')) continue
+    let position = index + 1
+    if (position >= words.length || words[position].type === 'keyword') continue
+    let table = unquote(statement.slice(words[position].start, words[position].end))
+    // A qualified name spends two more tokens on the dot and the table.
+    if (statement[words[position].end] === '.' && words[position + 1]) {
+      position += 1
+      table = unquote(statement.slice(words[position].start, words[position].end))
+    }
+    aliases[table.toLowerCase()] = table
+    let next = words[position + 1]
+    if (next && next.type === 'keyword' && statement.slice(next.start, next.end).toLowerCase() === 'as') next = words[position + 2]
+    if (next && next.type !== 'keyword') {
+      const alias = unquote(statement.slice(next.start, next.end))
+      if (alias && !alias.includes('(')) aliases[alias.toLowerCase()] = table
+    }
+  }
+  return aliases
+}
+
+/**
+ * completionContext describes what the caret is asking for, or null where
+ * suggesting anything would be wrong - inside a string or a comment.
+ */
+export function completionContext(text: string, caret: number): CompletionContext | null {
+  const { tokens, statements } = scanSql(text)
+  // The end of a comment line, and the end of a string still being typed, are
+  // both inside it, so the upper bound is inclusive.
+  const enclosing = tokens.find(token => caret > token.start && caret <= token.end)
+  if (enclosing && (enclosing.type === 'string' || enclosing.type === 'comment')) return null
+
+  let start = caret
+  while (start > 0 && identifierChar.test(text[start - 1])) start--
+  // Accepting replaces the whole word, so a completion taken mid-word does not
+  // leave its tail behind.
+  let end = caret
+  while (end < text.length && identifierChar.test(text[end])) end++
+  const prefix = text.slice(start, caret)
+
+  let qualifier = ''
+  if (text[start - 1] === '.') {
+    let qualifierStart = start - 1
+    while (qualifierStart > 0 && identifierChar.test(text[qualifierStart - 1])) qualifierStart--
+    qualifier = text.slice(qualifierStart, start - 1)
+  }
+
+  // The last keyword before the word decides whether a relation is expected.
+  let wants: CompletionContext['wants'] = qualifier ? 'column' : 'any'
+  if (!qualifier) {
+    const previous = [...tokens].reverse().find(token => token.end <= start && token.type === 'keyword')
+    if (previous && relationKeywords.has(text.slice(previous.start, previous.end).toLowerCase())) wants = 'table'
+  }
+
+  const statement = statements.find(item => caret >= item.start && caret <= item.end)
+  return { prefix, start, end, qualifier, wants, statement }
+}
+
+function rank(label: string, prefix: string): number {
+  if (!prefix) return 1
+  const haystack = label.toLowerCase()
+  const needle = prefix.toLowerCase()
+  if (haystack.startsWith(needle)) return 0
+  return haystack.includes(needle) ? 1 : -1
+}
+
+/** sqlCompletions builds the suggestion list for a context, best match first. */
+export function sqlCompletions(context: CompletionContext, tables: CompletionTable[], limit = 40): Completion[] {
+  const aliases = context.statement ? tableAliases(context.statement.body) : {}
+  const findTable = (name: string) => {
+    const target = (aliases[name.toLowerCase()] ?? name).toLowerCase()
+    return tables.find(table => table.name.toLowerCase() === target)
+  }
+
+  const candidates: Completion[] = []
+  if (context.qualifier) {
+    const table = findTable(context.qualifier)
+    for (const column of table?.columns ?? []) candidates.push({ label: column, detail: table!.name, kind: 'column' })
+  } else {
+    for (const table of tables) candidates.push({ label: table.name, detail: table.schema, kind: 'table' })
+    if (context.wants !== 'table') {
+      // Columns of the tables this statement already mentions come before
+      // keywords, because they are what the writer is most likely reaching for.
+      const mentioned = new Set(Object.values(aliases).map(name => name.toLowerCase()))
+      for (const table of tables) {
+        if (!mentioned.has(table.name.toLowerCase())) continue
+        for (const column of table.columns) candidates.push({ label: column, detail: table.name, kind: 'column' })
+      }
+      for (const keyword of KEYWORDS) candidates.push({ label: keyword.toUpperCase(), detail: 'keyword', kind: 'keyword' })
+    }
+  }
+
+  const order: Record<CompletionKind, number> = { column: 0, table: 1, keyword: 2 }
+  const seen = new Set<string>()
+  return candidates
+    .map(item => ({ item, score: rank(item.label, context.prefix) }))
+    .filter(entry => entry.score >= 0)
+    .sort((a, b) => a.score - b.score || order[a.item.kind] - order[b.item.kind])
+    .filter(entry => {
+      const key = `${entry.item.kind}:${entry.item.label.toLowerCase()}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .slice(0, limit)
+    .map(entry => entry.item)
+}

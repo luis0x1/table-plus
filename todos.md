@@ -17,8 +17,8 @@
   + [x] trong màn hình khi đã kết nối database, bỏ card icon + QueryNet
   + [x] thêm tabs ở trên ô search filter objects (data, scripts)
   + [x] script sql sẽ yêu cầu tạo file để thao tác, sẽ có worktree files theo connection, mỗi connection lưu lại sẽ sinh ra 1 hash, file sẽ lưu vào <appDataDir>/projects/<hash>: ~/Library/Application Support/QueryNest/projects/<hash> ở bản default, <thư mục cạnh binary>/data/projects/<hash> ở bản portable
-  + chương trình sẽ phân tích script sql để vạch ra các scope, scope nào gần cursor nhất thì bôi màu nhẹ vào cho user biết là khi bấm run thì script đó sẽ chạy, nếu người dùng bôi đen nhiều script thì sẽ chạy nhiều, khi người dùng chọn bôi đen nhiều scope thì sẽ có 1 minimap bên phải trên hiển thị list script sẽ chạy(để dạng vắn tắt k hiển thị toàn bộ...).
-  + thêm completion và hightlight syntax cho mã sql;
+  + [x] chương trình sẽ phân tích script sql để vạch ra các scope, scope nào gần cursor nhất thì bôi màu nhẹ vào cho user biết là khi bấm run thì script đó sẽ chạy, nếu người dùng bôi đen nhiều script thì sẽ chạy nhiều, khi người dùng chọn bôi đen nhiều scope thì sẽ có 1 minimap bên phải trên hiển thị list script sẽ chạy(để dạng vắn tắt k hiển thị toàn bộ...).
+  + [x] thêm completion và hightlight syntax cho mã sql;
 
 - thêm filters, chọn column, đặt limit page
 
