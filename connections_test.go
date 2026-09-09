@@ -3,6 +3,7 @@ package main
 import (
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -10,6 +11,49 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 )
+
+func TestUpdateSavedConnection(t *testing.T) {
+	app := NewApp()
+	app.dataDirOverride = t.TempDir()
+	sqlitePath := filepath.Join(t.TempDir(), "original.db")
+	updatedSQLitePath := filepath.Join(t.TempDir(), "updated.db")
+	if err := seedDemo(sqlitePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedDemo(updatedSQLitePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.writeConnectionProfiles([]SavedConnection{
+		{ID: "sqlite", Name: "Original", Driver: driverSQLite, Path: sqlitePath},
+		{ID: "postgres", Name: "Original PG", Driver: driverPostgres, Host: "localhost", Port: 5432, User: "postgres", Database: "app", SSLMode: "prefer", HasPassword: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.UpdateSavedConnection(SavedConnectionUpdate{ID: "sqlite", Name: "Renamed", Driver: driverSQLite, Path: updatedSQLitePath}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.UpdateSavedConnection(SavedConnectionUpdate{ID: "postgres", Name: "Production", Driver: driverPostgres, Host: " db.example.com ", User: " app_user ", Database: " main ", ReadOnly: true, SavePassword: true}); err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := app.ListSavedConnections()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profiles[0].Name != "Renamed" || profiles[0].Path != updatedSQLitePath {
+		t.Fatalf("SQLite profile was not updated: %#v", profiles[0])
+	}
+	postgres := profiles[1]
+	if postgres.Name != "Production" || postgres.Host != "db.example.com" || postgres.Port != 5432 || postgres.User != "app_user" || postgres.Database != "main" || postgres.SSLMode != "prefer" || !postgres.ReadOnly || !postgres.HasPassword {
+		t.Fatalf("PostgreSQL profile was not updated safely: %#v", postgres)
+	}
+	data, err := os.ReadFile(filepath.Join(app.dataDirOverride, "connections.json"))
+	if err != nil || strings.Contains(string(data), `"password"`) {
+		t.Fatalf("connection JSON must not contain a password: %s, %v", data, err)
+	}
+	if err := app.UpdateSavedConnection(SavedConnectionUpdate{ID: "sqlite", Driver: driverPostgres}); err == nil {
+		t.Fatal("saved connection driver change must be rejected")
+	}
+}
 
 func TestPostgresConnectionValidation(t *testing.T) {
 	app := openTestApp(t)
@@ -38,9 +82,8 @@ func TestPostgresConnectionDoesNotReplaceOrSave(t *testing.T) {
 			name = "authentication failure"
 		}
 		t.Run(name, func(t *testing.T) {
-			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-			t.Setenv("APPDATA", t.TempDir())
 			app := openTestApp(t)
+			app.dataDirOverride = t.TempDir()
 			before := app.GetStatus()
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
@@ -113,7 +156,7 @@ func TestPostgresConnectionDoesNotReplaceOrSave(t *testing.T) {
 			if _, err := app.ListTables(); err != nil {
 				t.Fatalf("active database is no longer usable: %v", err)
 			}
-			path, err := connectionProfilesPath()
+			path, err := app.connectionProfilesPath()
 			if err != nil {
 				t.Fatal(err)
 			}

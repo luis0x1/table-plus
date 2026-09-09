@@ -43,6 +43,21 @@ export interface SavedConnection {
   hasPassword: boolean
 }
 
+export interface SavedConnectionUpdate {
+  id: string
+  name: string
+  driver: string
+  path?: string
+  host?: string
+  port?: number
+  user?: string
+  password?: string
+  database?: string
+  sslMode?: string
+  readOnly: boolean
+  savePassword: boolean
+}
+
 export interface RowOperation {
   type: 'insert' | 'update' | 'delete' | 'truncate'
   values: Record<string, unknown>
@@ -55,6 +70,15 @@ export interface ColumnInfo {
   nullable: boolean
   primaryKey: boolean
   default: unknown
+}
+
+export interface IndexInfo {
+  name: string
+  type: string
+  columns: string[]
+  unique: boolean
+  primary: boolean
+  partial: boolean
 }
 
 export interface TableData {
@@ -77,7 +101,15 @@ export interface SidebarPreferences {
   tables: number
 }
 
+export type FontFamily = 'system' | 'humanist' | 'serif' | 'mono'
+
+export interface AppearancePreferences {
+  fontSize: number
+  fontFamily: FontFamily
+}
+
 export interface AppConfig {
   version: number
   sidebars: SidebarPreferences
+  appearance: AppearancePreferences
 }
