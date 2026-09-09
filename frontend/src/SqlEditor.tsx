@@ -72,7 +72,10 @@ export default function SqlEditor(props: SqlEditorProps) {
   const scope = () => runList().length === 1 ? runList()[0] : undefined
   const lines = createMemo(() => props.value.split('\n').length)
 
-  const syncSelection = () => setSelection({ start: input.selectionStart, end: input.selectionEnd })
+  const syncSelection = () => setSelection(previous =>
+    previous.start === input.selectionStart && previous.end === input.selectionEnd
+      ? previous
+      : { start: input.selectionStart, end: input.selectionEnd })
 
   const context = createMemo(() => completing() ? completionContext(props.value, selection().start) : null)
   const suggestions = createMemo<Completion[]>(() => {
@@ -94,7 +97,11 @@ export default function SqlEditor(props: SqlEditorProps) {
     }
   })
 
-  createEffect(on(suggestions, () => setHighlighted(0)))
+  const completionTarget = () => {
+    const active = context()
+    return active ? `${active.start}:${active.qualifier}:${active.prefix}` : ''
+  }
+  createEffect(on(completionTarget, () => setHighlighted(0)))
 
   const caretPosition = createMemo(() => {
     if (!completing() || !suggestions().length) return null
