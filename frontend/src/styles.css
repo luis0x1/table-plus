@@ -288,9 +288,30 @@ kbd { padding: 1px 4px; border: 1px solid #2c323a; border-radius: 4px; color: #5
 .query-header > div:first-child span { padding: 2px 5px; border-radius: 4px; color: #62caa8; background: rgba(55,186,143,.09); font-size: .5rem; text-transform: uppercase; }
 .shortcut { color: #505a66; font-size: .53125rem; }
 .query-workspace { display: grid; grid-template-columns: minmax(320px, 42%) 1fr; flex: 1; min-height: 0; }
-.editor-wrap { position: relative; min-width: 0; display: flex; border-right: 1px solid #272d34; background: #0d1014; }
-.line-numbers { width: 36px; padding-top: 11px; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; color: #414a55; font: .6875rem/1rem ui-monospace, monospace; user-select: none; }
-.editor-wrap textarea { flex: 1; min-width: 0; height: 100%; resize: none; border: 0; outline: 0; padding: 11px 12px; color: #baaaff; background: transparent; font: .6875rem/1.25rem ui-monospace, SFMono-Regular, Menlo, monospace; tab-size: 2; }
+/* The gutter, the highlight layer and the textarea must agree on every metric
+   to the pixel, so all three read them from here rather than repeating them. */
+.editor-wrap { --editor-font: .6875rem/1.25rem ui-monospace, SFMono-Regular, Menlo, monospace; --editor-pad-y: 11px; --editor-pad-x: 12px;
+  position: relative; min-width: 0; display: flex; border-right: 1px solid #272d34; background: #0d1014; }
+.line-numbers { width: 36px; flex: 0 0 36px; padding: var(--editor-pad-y) 8px 0 0; display: flex; flex-direction: column; align-items: flex-end; overflow: hidden; color: #414a55; font: var(--editor-font); tab-size: 2; user-select: none; }
+.sql-surface { position: relative; flex: 1; min-width: 0; }
+.sql-highlight, .sql-input { position: absolute; inset: 0; margin: 0; padding: var(--editor-pad-y) var(--editor-pad-x); border: 0; font: var(--editor-font); tab-size: 2; white-space: pre; overflow-wrap: normal; }
+.sql-highlight { overflow: hidden; color: #7f8b99; pointer-events: none; }
+.sql-input { resize: none; outline: 0; overflow: auto; color: transparent; caret-color: #baaaff; background: transparent; }
+/* A translucent selection keeps the coloured text underneath readable. */
+.sql-input::selection { background: rgba(124,92,255,.3); }
+.sql-keyword { color: #b28cff; font-weight: 600; }
+.sql-string { color: #6fca9f; }
+.sql-number { color: #e0a55f; }
+.sql-comment { color: #4f5b68; font-style: italic; }
+.sql-quoted { color: #6ec5d8; }
+.sql-operator { color: #77828f; }
+.sql-plain { color: #c3cad3; }
+/* The statement a run would execute, tinted only when it is unambiguous. */
+.sql-scope { background: rgba(124,92,255,.09); box-shadow: inset 2px 0 0 rgba(139,114,255,.5); border-radius: 2px; }
+.sql-run-list { position: absolute; z-index: 5; top: 8px; right: 10px; max-width: 300px; padding: 7px 9px; border: 1px solid #343b48; border-radius: 8px; background: rgba(20,24,30,.96); box-shadow: 0 12px 30px rgba(0,0,0,.45); animation: select-menu-in 160ms var(--ease-out) backwards; }
+.sql-run-list header { color: #8f7cde; font-size: .53125rem; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; }
+.sql-run-list ol { margin: 5px 0 0; padding: 0 0 0 16px; display: flex; flex-direction: column; gap: 3px; }
+.sql-run-list li { color: #98a2ae; font: .5625rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-query { position: absolute; right: 10px; bottom: 10px; height: 28px; padding: 0 10px; display: flex; align-items: center; gap: 6px; border-radius: 6px; color: white; background: #6749df; font-size: .59375rem; font-weight: 600; }
 .run-query:hover { background: #795be9; }.query-results { min-width: 0; position: relative; overflow: hidden; padding-top: 27px; }
 .result-meta { position: absolute; z-index: 4; left: 0; right: 0; top: 0; height: 27px; padding: 0 10px; display: flex; align-items: center; gap: 6px; color: #6acdaa; background: #13171c; border-bottom: 1px solid #22282f; font-size: .5625rem; }

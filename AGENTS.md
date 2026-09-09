@@ -17,6 +17,8 @@ QueryNest is a TablePlus-inspired desktop database client built with Go, Wails v
 - `backup_schema.go`: captures the source database's own DDL for a backup and builds the statements that replace it on restore.
 - `app_test.go`: backend and SQL-generation tests.
 - `frontend/src/App.tsx`: main UI, database workspaces, cached table panels, local drafts, unsaved-change guards, and undo/redo history.
+- `frontend/src/sql.ts`: the SQL scanner - tokens, statement boundaries, and which statements a run covers.
+- `frontend/src/SqlEditor.tsx`: the highlighted editor, scope tint and run list.
 - `frontend/src/DataGrid.tsx`: the data grid, windowed row rendering, draft grid construction, column order/resize, cell editing, and the JSON viewer.
 - `frontend/src/bridge.ts`: typed Wails API surface plus browser-preview mocks.
 - `frontend/src/types.ts`: shared frontend data contracts.
@@ -52,6 +54,9 @@ Use `rg` for exact text searches after CodeGraph has identified the relevant are
 - Saving a script writes to a temporary file and renames, so an interrupted save cannot leave a half-written script. Creating uses `O_EXCL` and renaming refuses an existing target, so neither can silently replace work.
 - An unsaved script is guarded the same way an unsaved grid draft is: switching scripts or deleting the open one asks before discarding.
 - The SQL panel doubles as the script editor and must work with no table tab open, where it renders standalone in place of the empty state.
+- Tokens and statement boundaries come from one pass of `scanSql`, so the colours and the statements the run button executes can never disagree. A semicolon inside a string, a comment, a dollar-quoted body or a `CREATE TRIGGER ... BEGIN ... END` block does not end a statement. A comment above a statement belongs to it; a trailing comment with no SQL after it is not a statement.
+- Running sends one statement per `ExecuteQuery` call, each in its own read-only transaction, so running several does not weaken the read-only console.
+- The gutter, the highlight layer and the textarea read their font, line height and padding from `--editor-*` on `.editor-wrap`. They must stay identical or the layers drift apart, which is what a separate line height and a gap did to the gutter before.
 - Grid mutations remain local drafts until the user saves them. `Ctrl+S` applies the active table's draft atomically.
 - Undo history depth comes from the `editing.undoHistoryLimit` preference (10-1000, default 100), not a literal. Read it through `props.editingPreferences` so lowering it releases memory immediately.
 - Preserve draft colors: updates yellow, inserts green, deletes and truncates red.

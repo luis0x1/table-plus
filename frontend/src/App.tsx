@@ -4,6 +4,7 @@ import { api, databaseApi, isDesktop, windowAction } from './bridge'
 import TabStrip from './TabStrip'
 import DatabasePicker from './DatabasePicker'
 import DataGrid, { buildDraftGrid, type PendingOperation } from './DataGrid'
+import SqlEditor from './SqlEditor'
 import useSidebarPreferences, { UNDO_HISTORY_RANGE } from './useSidebarPreferences'
 import SidebarResizeHandle, { useCompactSidebar, useSidebarWidth, type SidebarSizing } from './SidebarResizeHandle'
 import type { AppearancePreferences, ColumnInfo, ConnectionStatus, EditingPreferences, IndexInfo, PostgresConfig, QueryResult, SavedConnection, SavedConnectionUpdate, ScriptFile, TableData, TableRef, TableSummary, TransferPreferences, TransferPreview, TransferResult } from './types'
@@ -1045,10 +1046,22 @@ function DatabaseWorkspace(props: {
     else void remove()
   }
 
-  async function executeQuery() {
+  // The editor decides what a run covers: the statement at the cursor, or every
+  // statement the selection touches. Each one keeps its own read-only
+  // transaction, so the console stays read-only however many are sent.
+  async function executeQuery(statements: string[]) {
+    const queries = statements.map(statement => statement.trim()).filter(Boolean)
+    if (!queries.length) { setError('There is no statement to run.'); return }
     setQueryRunning(true); setError('')
-    try { setQueryResult(await db.ExecuteQuery(query())) }
-    catch (e) { setError(String(e)) }
+    try {
+      let result: QueryResult | null = null
+      for (const [position, statement] of queries.entries()) {
+        try { result = await db.ExecuteQuery(statement) }
+        catch (e) { throw new Error(`statement ${position + 1} of ${queries.length}: ${String(e).replace(/^Error:\s*/i, '')}`) }
+      }
+      if (result && queries.length > 1) result = { ...result, message: `${queries.length} statements · ${result.message}` }
+      setQueryResult(result)
+    } catch (e) { setError(String(e)) }
     finally { setQueryRunning(false) }
   }
 
@@ -1506,15 +1519,14 @@ function SchemaView(props: { schema: ColumnInfo[]; indexes: IndexInfo[]; error: 
   </div>
 }
 
-function QueryPanel(props: { query: string; setQuery: (value: string) => void; result: QueryResult | null; running: boolean; scriptName: string; dirty: boolean; standalone?: boolean; onSave: () => void; onRun: () => void; onClose: () => void }) {
-  const lines = () => props.query.split('\n')
+function QueryPanel(props: { query: string; setQuery: (value: string) => void; result: QueryResult | null; running: boolean; scriptName: string; dirty: boolean; standalone?: boolean; onSave: () => void; onRun: (statements: string[]) => void; onClose: () => void }) {
   return <section class={`query-panel ${props.standalone ? 'standalone' : ''}`}>
     <div class="query-header">
       <div><Code size={15}/><b>{props.scriptName ? props.scriptName.replace(/\.sql$/i, '') : 'SQL Query'}</b><Show when={props.dirty}><i class="script-dirty" title="Unsaved changes"/></Show><span>Read-only</span></div>
       <div><Show when={props.scriptName}><button class="secondary query-save" disabled={!props.dirty} onClick={props.onSave}><Save size={14}/> Save<kbd>Ctrl S</kbd></button></Show><span class="shortcut">⌘ ↵ to run</span><button class="icon-button" onClick={props.onClose}><X size={15}/></button></div>
     </div>
     <div class="query-workspace">
-      <div class="editor-wrap"><div class="line-numbers"><Index each={lines()}>{(_line, index) => <span>{index + 1}</span>}</Index></div><textarea value={props.query} spellcheck={false} onInput={e => props.setQuery(e.currentTarget.value)} onKeyDown={e => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') props.onRun() }}/><button class="run-query" disabled={props.running} onClick={props.onRun}><Play size={14}/>{props.running ? 'Running…' : 'Run query'}</button></div>
+      <SqlEditor value={props.query} running={props.running} onInput={props.setQuery} onRun={props.onRun} onSave={props.scriptName ? props.onSave : undefined}/>
       <div class="query-results"><Show when={props.result} fallback={<div class="result-placeholder"><Play size={20}/><span>Run the query to see results</span></div>}>{result => <><div class="result-meta"><Check size={13}/>{result().message}<span>{result().durationMs} ms</span></div><DataGrid data={result()} compact/></>}</Show></div>
     </div>
   </section>
