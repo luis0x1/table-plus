@@ -1,10 +1,11 @@
-import type { AppConfig, AppearancePreferences, SidebarPreferences, ColumnInfo, ConnectionStatus, IndexInfo, PostgresConfig, QueryResult, RowOperation, SavedConnection, SavedConnectionUpdate, TableData, TableRef, TableSummary, TransferPreferences, TransferPreview, TransferResult } from './types'
+import type { AppConfig, AppearancePreferences, EditingPreferences, SidebarPreferences, ColumnInfo, ConnectionStatus, IndexInfo, PostgresConfig, QueryResult, RowOperation, SavedConnection, SavedConnectionUpdate, TableData, TableRef, TableSummary, TransferPreferences, TransferPreview, TransferResult } from './types'
 
 type Backend = {
   LoadAppConfig(legacy: SidebarPreferences): Promise<AppConfig>
   SaveSidebarPreferences(preferences: SidebarPreferences): Promise<void>
   SaveAppearancePreferences(preferences: AppearancePreferences): Promise<void>
   SaveTransferPreferences(preferences: TransferPreferences): Promise<void>
+  SaveEditingPreferences(preferences: EditingPreferences): Promise<void>
   ListDatabaseSessions(): Promise<ConnectionStatus[]>
   OpenPostgresSession(config: PostgresConfig): Promise<ConnectionStatus>
   OpenSavedSession(id: string, password: string): Promise<ConnectionStatus>
@@ -76,11 +77,12 @@ let mockConnected = false
 let mockSessions: ConnectionStatus[] = []
 const defaultAppearance: AppearancePreferences = { fontSize: 17, fontFamily: 'system' }
 const defaultTransfer: TransferPreferences = { backupBatchSizeMB: 500 }
+const defaultEditing: EditingPreferences = { undoHistoryLimit: 100 }
 function mockAppConfig(legacy: SidebarPreferences): AppConfig {
   const stored = localStorage.getItem('querynest:preview-config')
-  if (!stored) return { version: 1, sidebars: legacy, appearance: defaultAppearance, transfer: defaultTransfer }
+  if (!stored) return { version: 1, sidebars: legacy, appearance: defaultAppearance, transfer: defaultTransfer, editing: defaultEditing }
   const parsed = JSON.parse(stored) as Partial<AppConfig>
-  return { version: 1, sidebars: parsed.sidebars ?? legacy, appearance: { ...defaultAppearance, ...parsed.appearance }, transfer: { ...defaultTransfer, ...parsed.transfer } }
+  return { version: 1, sidebars: parsed.sidebars ?? legacy, appearance: { ...defaultAppearance, ...parsed.appearance }, transfer: { ...defaultTransfer, ...parsed.transfer }, editing: { ...defaultEditing, ...parsed.editing } }
 }
 function saveMockConfig(config: AppConfig) {
   localStorage.setItem('querynest:preview-config', JSON.stringify(config))
@@ -111,6 +113,9 @@ const mock: Backend = {
   },
   async SaveTransferPreferences(preferences) {
     saveMockConfig({ ...mockAppConfig({ databases: 1, tables: 1 }), transfer: preferences })
+  },
+  async SaveEditingPreferences(preferences) {
+    saveMockConfig({ ...mockAppConfig({ databases: 1, tables: 1 }), editing: preferences })
   },
   async ListDatabaseSessions() { return [...mockSessions] },
   async OpenPostgresSession(config) { return addMockSession(await this.ConnectPostgres(config)) },

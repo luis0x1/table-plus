@@ -72,6 +72,7 @@ func TestAppConfigMigratesLegacyFileToSharedDataDirectory(t *testing.T) {
 		Sidebars:   SidebarPreferences{Databases: 1.75, Tables: 1.25},
 		Appearance: AppearancePreferences{FontSize: 18, FontFamily: "mono"},
 		Transfer:   TransferPreferences{BackupBatchSizeMB: 500},
+		Editing:    EditingPreferences{UndoHistoryLimit: 100},
 	}
 	if err := writeAppConfig(app.legacyConfigPath, want, nil); err != nil {
 		t.Fatal(err)
@@ -180,5 +181,50 @@ func TestAppConfigConcurrentUpdatesRemainReadable(t *testing.T) {
 	files, err := os.ReadDir(filepath.Dir(app.configPath))
 	if err != nil || len(files) != 1 || files[0].Name() != "config.json" {
 		t.Fatalf("left temporary files behind: %v, %v", files, err)
+	}
+}
+
+func TestEditingPreferencesRoundTripAndValidation(t *testing.T) {
+	app := NewApp()
+	app.configPath = filepath.Join(t.TempDir(), ".querynet", "config.json")
+	config, err := app.LoadAppConfig(SidebarPreferences{Databases: 1, Tables: 1})
+	if err != nil || config.Editing != (EditingPreferences{UndoHistoryLimit: 100}) {
+		t.Fatalf("default editing preferences: %#v, %v", config.Editing, err)
+	}
+	if err := app.SaveEditingPreferences(EditingPreferences{UndoHistoryLimit: 25}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := app.LoadAppConfig(SidebarPreferences{Databases: 1, Tables: 1})
+	if err != nil || reloaded.Editing.UndoHistoryLimit != 25 {
+		t.Fatalf("persisted editing preferences: %#v, %v", reloaded.Editing, err)
+	}
+	if reloaded.Transfer.BackupBatchSizeMB != 500 || reloaded.Appearance.FontSize != 17 {
+		t.Fatalf("saving editing preferences disturbed other sections: %#v", reloaded)
+	}
+	for _, limit := range []int{9, 1001, 0, -1} {
+		if err := app.SaveEditingPreferences(EditingPreferences{UndoHistoryLimit: limit}); err == nil {
+			t.Fatalf("accepted out-of-range undo history limit %d", limit)
+		}
+	}
+	after, err := app.LoadAppConfig(SidebarPreferences{Databases: 1, Tables: 1})
+	if err != nil || after.Editing.UndoHistoryLimit != 25 {
+		t.Fatalf("rejected write changed stored settings: %#v, %v", after.Editing, err)
+	}
+}
+
+func TestAppConfigWithoutEditingSectionKeepsDefault(t *testing.T) {
+	app := NewApp()
+	app.configPath = filepath.Join(t.TempDir(), "config.json")
+	// A config written before the editing section existed must still load.
+	legacy := `{"version":1,"sidebars":{"databases":1,"tables":1},"appearance":{"fontSize":18,"fontFamily":"mono"},"transfer":{"backupBatchSizeMB":250}}`
+	if err := os.WriteFile(app.configPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := app.LoadAppConfig(SidebarPreferences{Databases: 1, Tables: 1})
+	if err != nil || config.Editing.UndoHistoryLimit != 100 {
+		t.Fatalf("missing editing section: %#v, %v", config.Editing, err)
+	}
+	if config.Appearance.FontSize != 18 || config.Transfer.BackupBatchSizeMB != 250 {
+		t.Fatalf("existing settings were not preserved: %#v", config)
 	}
 }

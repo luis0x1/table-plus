@@ -186,7 +186,8 @@ kbd { padding: 1px 4px; border: 1px solid #2c323a; border-radius: 4px; color: #5
 .json-cell svg { flex: 0 0 auto; color: #8f7aec; }
 .json-preview { width: 0; min-width: 0; flex: 1 1 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .json-cell:hover { background: rgba(124,92,255,.1); color: #d3d6dc; }
-.data-grid tbody tr:nth-child(even) td { background: rgba(255,255,255,.009); }
+.data-grid tbody tr.even td { background: rgba(255,255,255,.009); }
+.data-grid tbody tr.grid-spacer td, .data-grid tbody tr.grid-spacer:hover td { padding: 0; border: 0; background: none; box-shadow: none; }
 .data-grid tbody tr:hover td { background: #161a20; color: #d8dce2; }
 .data-grid tbody tr.draft-update td { background: rgba(196,151,37,.11); border-bottom-color: rgba(211,168,55,.2); }.data-grid tbody tr.draft-update:hover td { background: rgba(196,151,37,.16); }.data-grid tbody tr.draft-insert td { background: rgba(40,172,113,.11); border-bottom-color: rgba(62,194,132,.2); }.data-grid tbody tr.draft-insert:hover td { background: rgba(40,172,113,.16); }.data-grid tbody tr.draft-delete td { background: rgba(196,54,62,.12); color: #a47478; border-bottom-color: rgba(211,70,78,.22); text-decoration: line-through; }.data-grid tbody tr.draft-delete:hover td { background: rgba(196,54,62,.17); }.data-grid tbody tr.selected td { box-shadow: inset 0 0 0 1px rgba(124,92,255,.24); }
 .data-grid .row-number { width: auto; min-width: 0; max-width: none; padding: 0 10px; text-align: right; color: #4e5864; background: #111419; user-select: none; }

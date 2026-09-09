@@ -10,11 +10,11 @@ QueryNest is a TablePlus-inspired desktop database client built with Go, Wails v
 - `app.go`: connection state, table/schema browsing, paginated reads, and the read-only SQL console.
 - `database_sessions.go`: independent open-database sessions and session-scoped backend forwarding.
 - `connections.go`: saved connection profiles and OS credential-manager integration.
-- `config.go`: persisted application, sidebar, and appearance preferences.
+- `config.go`: persisted application, sidebar, appearance, data-operation, and editing preferences.
 - `data_edit.go`: validated insert, update, delete, and truncate operations applied in one transaction.
 - `app_test.go`: backend and SQL-generation tests.
 - `frontend/src/App.tsx`: main UI, database workspaces, cached table panels, local drafts, unsaved-change guards, and undo/redo history.
-- `frontend/src/DataGrid.tsx`: the data grid, draft grid construction, column order/resize, cell editing, and the JSON viewer.
+- `frontend/src/DataGrid.tsx`: the data grid, windowed row rendering, draft grid construction, column order/resize, cell editing, and the JSON viewer.
 - `frontend/src/bridge.ts`: typed Wails API surface plus browser-preview mocks.
 - `frontend/src/types.ts`: shared frontend data contracts.
 - `frontend/src/icons.tsx` and `frontend/vite.config.ts`: the Solid Material Symbols component and build-time icon-weight path extraction.
@@ -45,6 +45,7 @@ Use `rg` for exact text searches after CodeGraph has identified the relevant are
 - SQLite virtual tables such as `VirtualKNN` and `VirtualSpatialIndex` can require modules unavailable in the current build. Surface a clear per-table unavailable-module error. If support is added, bundle/register the supported extension in QueryNest; do not silently depend on a user-installed system extension.
 - Structure view includes both columns and indexes. Keep SQLite and PostgreSQL index introspection synchronized through Go methods, session forwarding, bridge types, browser mocks, and frontend rendering.
 - Grid mutations remain local drafts until the user saves them. `Ctrl+S` applies the active table's draft atomically.
+- Undo history depth comes from the `editing.undoHistoryLimit` preference (10-1000, default 100), not a literal. Read it through `props.editingPreferences` so lowering it releases memory immediately.
 - Preserve draft colors: updates yellow, inserts green, deletes and truncates red.
 - Preserve unsaved-change guards before an action can hide or replace edited rows.
 - Undo and redo operate on local drafts only; they must not issue compensating database writes.
@@ -59,6 +60,7 @@ Use `rg` for exact text searches after CodeGraph has identified the relevant are
 
 ## Grid interaction invariants
 
+- Result sets larger than `VIRTUAL_ROW_THRESHOLD` render windowed: spacer rows above and below the visible slice carry the remaining height, so `scrollHeight` stays correct. Paged table data is far below the threshold and keeps rendering every row, so only the SQL console's up-to-1000-row result pays for it. Rows are addressed by their absolute index (`firstRow() + offset`) — drafts, selection, the cell editor and the row number all depend on it — and zebra striping uses the `even` class rather than `:nth-child`, which the spacer rows would shift.
 - The `#` column is the row index. It shows continuous page-aware row numbers, never an ellipsized value such as `1…`, and derives its width from the largest row number in the result set.
 - Preserve per-table data-column order and manually resized widths in local storage.
 - A divider between adjacent data headers uses two separate resize handles: 8 px inside the right edge of the left header and 8 px inside the left edge of the right header. Both handles resize the left-hand column, giving a centered 16 px hit area without overflowing across sticky-header stacking layers.

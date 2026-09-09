@@ -145,9 +145,14 @@ export interface TransferPreferences {
   backupBatchSizeMB: number
 }
 
+export interface EditingPreferences {
+  undoHistoryLimit: number
+}
+
 export interface AppConfig {
   version: number
   sidebars: SidebarPreferences
   appearance: AppearancePreferences
   transfer: TransferPreferences
+  editing: EditingPreferences
 }

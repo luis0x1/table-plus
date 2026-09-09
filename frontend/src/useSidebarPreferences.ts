@@ -1,9 +1,11 @@
 import { createEffect, createSignal, onCleanup, onMount } from 'solid-js'
 import { api } from './bridge'
-import type { AppearancePreferences, SidebarPreferences, TransferPreferences } from './types'
+import type { AppearancePreferences, EditingPreferences, SidebarPreferences, TransferPreferences } from './types'
 
 export const DEFAULT_APPEARANCE: AppearancePreferences = { fontSize: 17, fontFamily: 'system' }
 export const DEFAULT_TRANSFER: TransferPreferences = { backupBatchSizeMB: 500 }
+export const DEFAULT_EDITING: EditingPreferences = { undoHistoryLimit: 100 }
+export const UNDO_HISTORY_RANGE = { min: 10, max: 1000 }
 
 export const FONT_STACKS: Record<AppearancePreferences['fontFamily'], string> = {
   system: 'Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
@@ -26,6 +28,7 @@ export default function useSidebarPreferences(onError: (message: string) => void
   const [values, setValues] = createSignal(legacyPreferences())
   const [appearance, setAppearanceState] = createSignal(DEFAULT_APPEARANCE)
   const [transfer, setTransferState] = createSignal(DEFAULT_TRANSFER)
+  const [editing, setEditingState] = createSignal(DEFAULT_EDITING)
   const [ready, setReady] = createSignal(false)
   let latest = values()
   let saves = Promise.resolve()
@@ -39,6 +42,7 @@ export default function useSidebarPreferences(onError: (message: string) => void
       setValues(config.sidebars)
       setAppearanceState(config.appearance)
       setTransferState(config.transfer)
+      setEditingState(config.editing)
       setReady(true)
     }).catch(error => {
       if (!cancelled) onError(`Could not load application settings: ${String(error)}`)
@@ -86,5 +90,14 @@ export default function useSidebarPreferences(onError: (message: string) => void
     })
   }
 
-  return { values, setScale, commit, appearance, setAppearance, transfer, setTransfer, ready }
+  const setEditing = (next: EditingPreferences) => {
+    const normalized = { undoHistoryLimit: Math.max(UNDO_HISTORY_RANGE.min, Math.min(UNDO_HISTORY_RANGE.max, Math.round(next.undoHistoryLimit))) }
+    setEditingState(normalized)
+    if (!ready()) return
+    saves = saves.then(() => api().SaveEditingPreferences(normalized)).catch(error => {
+      onError(`Could not save editing settings: ${String(error)}`)
+    })
+  }
+
+  return { values, setScale, commit, appearance, setAppearance, transfer, setTransfer, editing, setEditing, ready }
 }

@@ -4,9 +4,9 @@ import { api, databaseApi, isDesktop, windowAction } from './bridge'
 import TabStrip from './TabStrip'
 import DatabasePicker from './DatabasePicker'
 import DataGrid, { buildDraftGrid, type PendingOperation } from './DataGrid'
-import useSidebarPreferences from './useSidebarPreferences'
+import useSidebarPreferences, { UNDO_HISTORY_RANGE } from './useSidebarPreferences'
 import SidebarResizeHandle, { useCompactSidebar, useSidebarWidth, type SidebarSizing } from './SidebarResizeHandle'
-import type { AppearancePreferences, ColumnInfo, ConnectionStatus, IndexInfo, PostgresConfig, QueryResult, SavedConnection, SavedConnectionUpdate, TableData, TableRef, TableSummary, TransferPreferences, TransferPreview, TransferResult } from './types'
+import type { AppearancePreferences, ColumnInfo, ConnectionStatus, EditingPreferences, IndexInfo, PostgresConfig, QueryResult, SavedConnection, SavedConnectionUpdate, TableData, TableRef, TableSummary, TransferPreferences, TransferPreview, TransferResult } from './types'
 import { Alert, Check, ChevronDown, ChevronRight, Clock, Code, Columns, Command, Copy, Database, Edit, Eye, File, Filter, Key, More, PanelLeft, Pin, Play, Plus, Redo, Refresh, Save, Search, Settings, Table, Trash, Undo, X } from './icons'
 
 const emptyData = (): TableData => ({ columns: [], rows: [], total: 0, durationMs: 0 })
@@ -242,9 +242,11 @@ const FONT_OPTIONS: { value: AppearancePreferences['fontFamily']; label: string;
 function AppearanceModal(props: {
   appearance: AppearancePreferences
   transfer: TransferPreferences
+  editing: EditingPreferences
   ready: boolean
   onChange: (next: AppearancePreferences) => void
   onTransferChange: (next: TransferPreferences) => void
+  onEditingChange: (next: EditingPreferences) => void
   onClose: () => void
 }) {
   onMount(() => {
@@ -275,6 +277,11 @@ function AppearanceModal(props: {
           <div class="setting-heading"><div><b>Backup batch size</b><small>Flushes streamed backup data and writes a recovery checkpoint at this interval.</small></div><output>{props.transfer.backupBatchSizeMB.toLocaleString()} MB</output></div>
           <label class="batch-size-control"><input type="number" min="1" max="10240" step="1" value={props.transfer.backupBatchSizeMB} disabled={!props.ready} onInput={event => props.onTransferChange({ backupBatchSizeMB: Number(event.currentTarget.value) || 1 })}/><span>MB</span></label>
           <div class="batch-size-hint">The default is 500 MB. Data is streamed continuously and is not buffered to this size in memory.</div>
+        </section>
+        <section class="appearance-section">
+          <div class="setting-heading"><div><b>Undo history limit</b><small>How many draft changes each table tab can step back through.</small></div><output>{props.editing.undoHistoryLimit.toLocaleString()} changes</output></div>
+          <label class="batch-size-control"><input type="number" min={UNDO_HISTORY_RANGE.min} max={UNDO_HISTORY_RANGE.max} step="1" value={props.editing.undoHistoryLimit} disabled={!props.ready} aria-label="Undo history limit" onInput={event => props.onEditingChange({ undoHistoryLimit: Number(event.currentTarget.value) || UNDO_HISTORY_RANGE.min })}/><span>changes</span></label>
+          <div class="batch-size-hint">The default is 100. Each step keeps a snapshot of that tab's pending changes, so a lower limit releases memory sooner.</div>
         </section>
         <section class="appearance-section">
           <div class="setting-heading"><div><b>Global font family</b><small>Choose the typeface used by the interface.</small></div></div>
@@ -507,7 +514,7 @@ export default function App() {
         </Show>
         <div class="database-panels" inert={blocked()}><For each={sessions()}>{session =>
           <Show when={!session.connectionState} fallback={<ConnectionSkeleton session={session} active={session.id === activeID()} tableSidebar={tableSidebar}/>}>
-            <DatabaseWorkspace status={session} active={session.id === activeID()} blocked={blocked()} tableSidebar={tableSidebar} transferPreferences={sidebarPreferences.transfer()} registerWorkspace={handle => { if (handle) workspaces.set(session.id, handle); else workspaces.delete(session.id) }} onNewConnection={newConnection} onCloseSession={() => closeSession(session.id)} onOpenDatabase={database => openDatabase(session.id, database)}/>
+            <DatabaseWorkspace status={session} active={session.id === activeID()} blocked={blocked()} tableSidebar={tableSidebar} transferPreferences={sidebarPreferences.transfer()} editingPreferences={sidebarPreferences.editing()} registerWorkspace={handle => { if (handle) workspaces.set(session.id, handle); else workspaces.delete(session.id) }} onNewConnection={newConnection} onCloseSession={() => closeSession(session.id)} onOpenDatabase={database => openDatabase(session.id, database)}/>
           </Show>
         }</For></div>
       </div>
@@ -517,7 +524,7 @@ export default function App() {
     <Show when={editingConnection()}>{profile => <SavedConnectionEditModal profile={profile()} busy={busy()} onSave={saveEditedConnection} onClose={() => setEditingConnection(null)}/>}</Show>
     <Show when={failedConnection()}>{session => <ConnectionFailureModal session={session()} onEdit={editFailedConnection} onClose={closeFailedConnection}/>}</Show>
     <Show when={appearanceOpen()}>
-      <AppearanceModal appearance={sidebarPreferences.appearance()} transfer={sidebarPreferences.transfer()} ready={sidebarPreferences.ready()} onChange={sidebarPreferences.setAppearance} onTransferChange={sidebarPreferences.setTransfer} onClose={() => setAppearanceOpen(false)}/>
+      <AppearanceModal appearance={sidebarPreferences.appearance()} transfer={sidebarPreferences.transfer()} editing={sidebarPreferences.editing()} ready={sidebarPreferences.ready()} onChange={sidebarPreferences.setAppearance} onTransferChange={sidebarPreferences.setTransfer} onEditingChange={sidebarPreferences.setEditing} onClose={() => setAppearanceOpen(false)}/>
     </Show>
   </div>
 }
@@ -552,6 +559,7 @@ function DatabaseWorkspace(props: {
   blocked: boolean
   tableSidebar: SidebarSizing
   transferPreferences: TransferPreferences
+  editingPreferences: EditingPreferences
   registerWorkspace: (handle: WorkspaceHandle | null) => void
   onNewConnection: () => void
   onCloseSession: () => Promise<void>
@@ -946,6 +954,8 @@ function DatabaseWorkspace(props: {
     finally { setQueryRunning(false) }
   }
 
+  const historyLimit = () => props.editingPreferences.undoHistoryLimit
+
   function changeDraft(key: string, change: (operations: PendingOperation[]) => PendingOperation[]) {
     if (!key) return
     const history = draftFor(key)
@@ -953,7 +963,7 @@ function DatabaseWorkspace(props: {
     const nextOperations = change(present)
     if (JSON.stringify(nextOperations) === JSON.stringify(present)) return
     setDraftsByTable(key, {
-      past: [...unwrap(history.past), present].slice(-100),
+      past: [...unwrap(history.past), present].slice(-historyLimit()),
       present: nextOperations,
       future: [],
     })
@@ -971,7 +981,7 @@ function DatabaseWorkspace(props: {
     const present = unwrap(history.present)
     const future = unwrap(history.future)
     batch(() => {
-      setDraftsByTable(key, { past: past.slice(0, -1), present: past[past.length - 1], future: [present, ...future].slice(0, 100) })
+      setDraftsByTable(key, { past: past.slice(0, -1), present: past[past.length - 1], future: [present, ...future].slice(0, historyLimit()) })
       updateTabState(key, state => ({ ...state, selectedRows: new Set() }))
     })
   }
@@ -983,7 +993,7 @@ function DatabaseWorkspace(props: {
     const present = unwrap(history.present)
     const future = unwrap(history.future)
     batch(() => {
-      setDraftsByTable(key, { past: [...past, present].slice(-100), present: future[0], future: future.slice(1) })
+      setDraftsByTable(key, { past: [...past, present].slice(-historyLimit()), present: future[0], future: future.slice(1) })
       updateTabState(key, state => ({ ...state, selectedRows: new Set() }))
     })
   }

@@ -24,11 +24,16 @@ type TransferPreferences struct {
 	BackupBatchSizeMB int64 `json:"backupBatchSizeMB"`
 }
 
+type EditingPreferences struct {
+	UndoHistoryLimit int `json:"undoHistoryLimit"`
+}
+
 type AppConfig struct {
 	Version    int                   `json:"version"`
 	Sidebars   SidebarPreferences    `json:"sidebars"`
 	Appearance AppearancePreferences `json:"appearance"`
 	Transfer   TransferPreferences   `json:"transfer"`
+	Editing    EditingPreferences    `json:"editing"`
 }
 
 func defaultAppConfig() AppConfig {
@@ -37,6 +42,7 @@ func defaultAppConfig() AppConfig {
 		Sidebars:   SidebarPreferences{Databases: 1, Tables: 1},
 		Appearance: AppearancePreferences{FontSize: 17, FontFamily: "system"},
 		Transfer:   TransferPreferences{BackupBatchSizeMB: 500},
+		Editing:    EditingPreferences{UndoHistoryLimit: 100},
 	}
 }
 
@@ -72,6 +78,10 @@ func validAppearancePreferences(p AppearancePreferences) bool {
 
 func validTransferPreferences(p TransferPreferences) bool {
 	return p.BackupBatchSizeMB >= 1 && p.BackupBatchSizeMB <= 10240
+}
+
+func validEditingPreferences(p EditingPreferences) bool {
+	return p.UndoHistoryLimit >= 10 && p.UndoHistoryLimit <= 1000
 }
 
 // LoadAppConfig migrates the legacy file or browser preferences when the new
@@ -179,6 +189,24 @@ func (a *App) SaveTransferPreferences(preferences TransferPreferences) error {
 	return writeAppConfig(path, config, fields)
 }
 
+func (a *App) SaveEditingPreferences(preferences EditingPreferences) error {
+	if !validEditingPreferences(preferences) {
+		return errors.New("undo history limit must be between 10 and 1000 changes")
+	}
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	path, err := a.appConfigPath()
+	if err != nil {
+		return err
+	}
+	config, fields, err := readAppConfig(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	config.Version, config.Editing = 1, preferences
+	return writeAppConfig(path, config, fields)
+}
+
 func readAppConfig(path string) (AppConfig, map[string]json.RawMessage, error) {
 	config := defaultAppConfig()
 	data, err := os.ReadFile(path)
@@ -203,6 +231,9 @@ func readAppConfig(path string) (AppConfig, map[string]json.RawMessage, error) {
 	}
 	if !validTransferPreferences(config.Transfer) {
 		return config, nil, errors.New("read configuration: invalid data operation settings")
+	}
+	if !validEditingPreferences(config.Editing) {
+		return config, nil, errors.New("read configuration: invalid editing settings")
 	}
 	return config, fields, nil
 }
@@ -246,6 +277,17 @@ func writeAppConfig(path string, config AppConfig, fields map[string]json.RawMes
 	}
 	transfer["backupBatchSizeMB"], _ = json.Marshal(config.Transfer.BackupBatchSizeMB)
 	fields["transfer"], _ = json.Marshal(transfer)
+	editing := make(map[string]json.RawMessage)
+	if raw := fields["editing"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &editing); err != nil {
+			return fmt.Errorf("read editing configuration: %w", err)
+		}
+		if editing == nil {
+			editing = make(map[string]json.RawMessage)
+		}
+	}
+	editing["undoHistoryLimit"], _ = json.Marshal(config.Editing.UndoHistoryLimit)
+	fields["editing"], _ = json.Marshal(editing)
 	fields["version"], _ = json.Marshal(config.Version)
 	data, err := json.MarshalIndent(fields, "", "  ")
 	if err != nil {

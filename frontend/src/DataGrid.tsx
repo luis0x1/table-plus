@@ -1,8 +1,13 @@
-import { createEffect, createSignal, Index, mergeProps, on, Show, type JSX } from 'solid-js'
+import { createEffect, createSignal, Index, mergeProps, on, onCleanup, onMount, Show, type JSX } from 'solid-js'
 import type { ColumnInfo, RowOperation, TableData } from './types'
 import { Alert, ArrowDown, ArrowUp, Check, Code, Columns, X } from './icons'
 
 export type PendingOperation = RowOperation & { id: string }
+
+// Paged table data stays well under this, so only large result sets — the SQL
+// console returns up to 1000 rows with no paging — pay for windowed rendering.
+const VIRTUAL_ROW_THRESHOLD = 120
+const OVERSCAN_ROWS = 8
 
 type GridRowMeta = {
   id: string
@@ -91,6 +96,11 @@ export default function DataGrid(raw: DataGridProps) {
   const [saving, setSaving] = createSignal(false)
   const [jsonCell, setJsonCell] = createSignal<{ row: number; column: string; value: unknown } | null>(null)
   let cancelBlur = false
+  let scroller!: HTMLDivElement
+  let body!: HTMLTableSectionElement
+  const [scrollTop, setScrollTop] = createSignal(0)
+  const [viewport, setViewport] = createSignal(0)
+  const [rowHeight, setRowHeight] = createSignal(props.compact ? 29 : 34)
 
   // Reload the stored layout whenever the tab's identity or column set changes.
   createEffect(on(() => [props.layoutKey, props.data.columns.join('\u0000')] as const, ([layoutKey]) => {
@@ -114,6 +124,36 @@ export default function DataGrid(raw: DataGridProps) {
     const currentWidths = widths()
     if (layoutKey && currentOrder.length) localStorage.setItem(`querynest:grid:${layoutKey}`, JSON.stringify({ order: currentOrder, widths: currentWidths }))
   })
+
+  const totalRows = () => props.data.rows.length
+  const virtualized = () => totalRows() > VIRTUAL_ROW_THRESHOLD
+  const firstRow = () => virtualized() ? Math.max(0, Math.floor(scrollTop() / rowHeight()) - OVERSCAN_ROWS) : 0
+  const lastRow = () => {
+    if (!virtualized()) return totalRows()
+    const span = Math.ceil((viewport() || rowHeight() * 20) / rowHeight()) + OVERSCAN_ROWS * 2
+    return Math.min(totalRows(), firstRow() + span)
+  }
+  const visibleRows = () => virtualized() ? props.data.rows.slice(firstRow(), lastRow()) : props.data.rows
+  const padTop = () => firstRow() * rowHeight()
+  const padBottom = () => Math.max(0, (totalRows() - lastRow()) * rowHeight())
+
+  onMount(() => {
+    const onScroll = () => setScrollTop(scroller.scrollTop)
+    const resize = new ResizeObserver(() => setViewport(scroller.clientHeight))
+    scroller.addEventListener('scroll', onScroll, { passive: true })
+    resize.observe(scroller)
+    setViewport(scroller.clientHeight)
+    onCleanup(() => { scroller.removeEventListener('scroll', onScroll); resize.disconnect() })
+  })
+
+  // Measure a rendered row so the spacers follow the stylesheet rather than a copy of it.
+  createEffect(on(() => [virtualized(), props.compact] as const, ([isVirtual]) => {
+    if (!isVirtual) return
+    queueMicrotask(() => {
+      const height = body?.querySelector<HTMLElement>('tr:not(.grid-spacer)')?.getBoundingClientRect().height
+      if (height) setRowHeight(height)
+    })
+  }))
 
   const shown = () => order().map(column => ({ column, source: props.data.columns.indexOf(column) })).filter(item => item.source >= 0)
   const columnWidth = (column: string) => widths()[column] ?? 160
@@ -162,8 +202,8 @@ export default function DataGrid(raw: DataGridProps) {
 
   return (
     <Show when={props.data.columns.length} fallback={<div class="empty-grid">No result columns</div>}>
-      <div class={`grid-scroll ${props.compact ? 'compact' : ''}`}>
-        <table class="data-grid" style={{ width: `${tableWidth()}px`, 'min-width': `${tableWidth()}px` }}>
+      <div ref={scroller} class={`grid-scroll ${props.compact ? 'compact' : ''}`}>
+        <table class="data-grid" style={{ width: `${tableWidth()}px`, 'min-width': `${tableWidth()}px` }} aria-rowcount={virtualized() ? totalRows() + 1 : undefined}>
           <colgroup><col class="row-col" style={{ width: `${rowNumberWidth()}px` }}/><Index each={shown()}>{item => <col style={{ width: `${columnWidth(item().column)}px` }}/>}</Index></colgroup>
           <thead><tr><th class="row-number">#</th><Index each={shown()}>{(item, columnIndex) => (
             <th
@@ -185,22 +225,27 @@ export default function DataGrid(raw: DataGridProps) {
               </Show>
             </th>
           )}</Index></tr></thead>
-          <tbody><Index each={props.data.rows}>{(row, rowIndex) => {
-            const meta = () => props.rowMeta[rowIndex]
+          <tbody ref={body}>
+          <Show when={padTop() > 0}><tr class="grid-spacer" aria-hidden="true"><td colspan={shown().length + 1} style={{ height: `${padTop()}px` }}/></tr></Show>
+          <Index each={visibleRows()}>{(row, offset) => {
+            // Windowed rendering keeps the absolute row index authoritative: drafts,
+            // selection, the editor and the row number all address rows by it.
+            const rowIndex = () => firstRow() + offset
+            const meta = () => props.rowMeta[rowIndex()]
             const rowID = () => meta()?.id ?? ''
-            return <tr class={`draft-${meta()?.kind ?? 'clean'} ${selected().has(rowID()) ? 'selected' : ''}`}>
-              <td class="row-number"><button class="row-selector" disabled={!props.onSelect || (meta()?.kind !== 'insert' && !meta()?.canEdit)} onClick={() => { const current = meta(); if (current) props.onSelect?.(current.id) }}>{selected().has(rowID()) ? <Check size={11}/> : props.rowOffset + rowIndex + 1}</button></td>
+            return <tr class={`draft-${meta()?.kind ?? 'clean'} ${selected().has(rowID()) ? 'selected' : ''} ${rowIndex() % 2 ? 'even' : ''}`} aria-rowindex={virtualized() ? rowIndex() + 2 : undefined}>
+              <td class="row-number"><button class="row-selector" disabled={!props.onSelect || (meta()?.kind !== 'insert' && !meta()?.canEdit)} onClick={() => { const current = meta(); if (current) props.onSelect?.(current.id) }}>{selected().has(rowID()) ? <Check size={11}/> : props.rowOffset + rowIndex() + 1}</button></td>
               <Index each={shown()}>{item => {
                 const value = () => row()[item().source]
                 const text = () => String(value() ?? '')
                 const isStatus = () => item().column.toLowerCase() === 'status'
                 const json = () => jsonText(value())
-                const active = () => { const state = editing(); return state && state.row === rowIndex && state.column === item().column ? state : null }
+                const active = () => { const state = editing(); return state && state.row === rowIndex() && state.column === item().column ? state : null }
                 const canEdit = () => props.editable && (meta()?.canEdit ?? true)
-                return <td class={canEdit() ? 'editable-cell' : ''} onDblClick={() => { if (canEdit() && props.onUpdate) { cancelBlur = false; setEditing({ row: rowIndex, column: item().column, text: String(value() ?? ''), original: value() }) } }}>
+                return <td class={canEdit() ? 'editable-cell' : ''} onDblClick={() => { if (canEdit() && props.onUpdate) { cancelBlur = false; setEditing({ row: rowIndex(), column: item().column, text: String(value() ?? ''), original: value() }) } }}>
                   <Show when={active()} fallback={
                     <Show when={json()} fallback={<span class={isStatus() ? `status-pill ${text().toLowerCase()}` : ''}>{formatCell(value())}</span>}>
-                      <button class="json-cell" title={JSON.stringify(JSON.parse(json()!))} onClick={() => setJsonCell({ row: rowIndex, column: item().column, value: value() })}><Code size={13}/><span class="json-preview">{JSON.stringify(JSON.parse(json()!))}</span></button>
+                      <button class="json-cell" title={JSON.stringify(JSON.parse(json()!))} onClick={() => setJsonCell({ row: rowIndex(), column: item().column, value: value() })}><Code size={13}/><span class="json-preview">{JSON.stringify(JSON.parse(json()!))}</span></button>
                     </Show>
                   }>{state => <input
                     class="cell-editor"
@@ -220,7 +265,9 @@ export default function DataGrid(raw: DataGridProps) {
                 </td>
               }}</Index>
             </tr>
-          }}</Index></tbody>
+          }}</Index>
+          <Show when={padBottom() > 0}><tr class="grid-spacer" aria-hidden="true"><td colspan={shown().length + 1} style={{ height: `${padBottom()}px` }}/></tr></Show>
+          </tbody>
         </table>
         <Show when={jsonCell()}>{cell => <JsonModal value={cell().value} editable={props.editable && (props.rowMeta[cell().row]?.canEdit ?? true)} onClose={() => setJsonCell(null)} onSave={props.onUpdate ? async value => { await props.onUpdate!(cell().column, cell().row, value); setJsonCell(null) } : undefined}/>}</Show>
       </div>
