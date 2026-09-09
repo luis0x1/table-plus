@@ -25,16 +25,34 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Windows x64
+          - name: Windows x64 Desktop
             os: windows-latest
             platform: windows/amd64
             output: QueryNest-windows-amd64.exe
-            artifact: windows-amd64
-          - name: macOS Universal
+            package: QueryNest-windows-amd64.exe
+            artifact: windows-amd64-desktop
+            portable: false
+          - name: Windows x64 Portable
+            os: windows-latest
+            platform: windows/amd64
+            output: QueryNest-portable-windows-amd64.exe
+            package: QueryNest-portable-windows-amd64.exe
+            artifact: windows-amd64-portable
+            portable: true
+          - name: macOS Universal Desktop
             os: macos-15-intel
             platform: darwin/universal
             output: QueryNest
-            artifact: macos-universal
+            package: QueryNest-macos-universal.zip
+            artifact: macos-universal-desktop
+            portable: false
+          - name: macOS Universal Portable
+            os: macos-15-intel
+            platform: darwin/universal
+            output: QueryNest-portable
+            package: QueryNest-portable-macos-universal.zip
+            artifact: macos-universal-portable
+            portable: true
 
     steps:
       - name: Check out source
@@ -136,16 +154,18 @@ jobs:
         run: go vet ./...
 
       - name: Build production application
-        run: wails build -clean -m -s -skipbindings -trimpath -platform "${{ matrix.platform }}" -o "${{ matrix.output }}"
+        env:
+          QUERYNEST_PORTABLE: ${{ matrix.portable }}
+        run: go run ./scripts/build.go -clean -m -s -skipbindings -trimpath -platform "${{ matrix.platform }}" -o "${{ matrix.output }}"
 
       - name: Package Windows artifact
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release | Out-Null
-          Copy-Item "build/bin/${{ matrix.output }}" "release/${{ matrix.output }}"
-          $hash = (Get-FileHash "release/${{ matrix.output }}" -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  ${{ matrix.output }}" | Set-Content "release/${{ matrix.output }}.sha256"
+          Copy-Item "build/bin/${{ matrix.output }}" "release/${{ matrix.package }}"
+          $hash = (Get-FileHash "release/${{ matrix.package }}" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  ${{ matrix.package }}" | Set-Content "release/${{ matrix.package }}.sha256"
 
       - name: Package macOS artifact
         if: runner.os == 'macOS'
@@ -153,9 +173,9 @@ jobs:
         run: |
           codesign --force --deep --sign - "build/bin/${{ matrix.output }}.app"
           mkdir -p release
-          ditto -c -k --sequesterRsrc --keepParent "build/bin/${{ matrix.output }}.app" "release/QueryNest-macos-universal.zip"
+          ditto -c -k --sequesterRsrc --keepParent "build/bin/${{ matrix.output }}.app" "release/${{ matrix.package }}"
           cd release
-          shasum -a 256 QueryNest-macos-universal.zip > QueryNest-macos-universal.zip.sha256
+          shasum -a 256 "${{ matrix.package }}" > "${{ matrix.package }}.sha256"
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v7
@@ -188,8 +208,12 @@ jobs:
         run: |
           test -f release/QueryNest-windows-amd64.exe
           test -f release/QueryNest-windows-amd64.exe.sha256
+          test -f release/QueryNest-portable-windows-amd64.exe
+          test -f release/QueryNest-portable-windows-amd64.exe.sha256
           test -f release/QueryNest-macos-universal.zip
           test -f release/QueryNest-macos-universal.zip.sha256
+          test -f release/QueryNest-portable-macos-universal.zip
+          test -f release/QueryNest-portable-macos-universal.zip.sha256
 
       - name: Create GitHub Release
         shell: bash

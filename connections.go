@@ -29,10 +29,25 @@ type SavedConnection struct {
 	HasPassword bool   `json:"hasPassword"`
 }
 
+type SavedConnectionUpdate struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Driver       string `json:"driver"`
+	Path         string `json:"path,omitempty"`
+	Host         string `json:"host,omitempty"`
+	Port         int    `json:"port,omitempty"`
+	User         string `json:"user,omitempty"`
+	Password     string `json:"password,omitempty"`
+	Database     string `json:"database,omitempty"`
+	SSLMode      string `json:"sslMode,omitempty"`
+	ReadOnly     bool   `json:"readOnly"`
+	SavePassword bool   `json:"savePassword"`
+}
+
 func (a *App) ListSavedConnections() ([]SavedConnection, error) {
 	a.profilesMu.Lock()
 	defer a.profilesMu.Unlock()
-	return loadConnectionProfiles()
+	return a.loadConnectionProfiles()
 }
 
 func (a *App) ConnectSavedConnection(id, password string) (ConnectionStatus, error) {
@@ -65,10 +80,34 @@ func (a *App) ConnectSavedConnection(id, password string) (ConnectionStatus, err
 	return ConnectionStatus{}, errors.New("saved connection not found")
 }
 
+// restoreSavedPassword keeps an edited saved connection usable without ever
+// sending its credential to the frontend. A password entered in the form wins.
+func (a *App) restoreSavedPassword(input PostgresConfig) (PostgresConfig, error) {
+	if strings.TrimSpace(input.ID) == "" || input.Password != "" {
+		return input, nil
+	}
+	profiles, err := a.ListSavedConnections()
+	if err != nil {
+		return input, err
+	}
+	for _, profile := range profiles {
+		if profile.ID != input.ID || !profile.HasPassword {
+			continue
+		}
+		password, err := keyring.Get(keyringService, profile.ID)
+		if err != nil {
+			return input, fmt.Errorf("read saved password: %w", err)
+		}
+		input.Password = password
+		break
+	}
+	return input, nil
+}
+
 func (a *App) DeleteSavedConnection(id string) error {
 	a.profilesMu.Lock()
 	defer a.profilesMu.Unlock()
-	profiles, err := loadConnectionProfiles()
+	profiles, err := a.loadConnectionProfiles()
 	if err != nil {
 		return err
 	}
@@ -86,7 +125,7 @@ func (a *App) DeleteSavedConnection(id string) error {
 	if !found {
 		return errors.New("saved connection not found")
 	}
-	if err := writeConnectionProfiles(next); err != nil {
+	if err := a.writeConnectionProfiles(next); err != nil {
 		return err
 	}
 	if hadPassword {
@@ -97,10 +136,94 @@ func (a *App) DeleteSavedConnection(id string) error {
 	return nil
 }
 
+// UpdateSavedConnection changes profile metadata and updates passwords only
+// through the operating-system credential manager, never connections.json.
+func (a *App) UpdateSavedConnection(input SavedConnectionUpdate) error {
+	a.profilesMu.Lock()
+	defer a.profilesMu.Unlock()
+	input.ID = strings.TrimSpace(input.ID)
+	if input.ID == "" {
+		return errors.New("saved connection ID is required")
+	}
+	profiles, err := a.loadConnectionProfiles()
+	if err != nil {
+		return err
+	}
+	index := -1
+	for i := range profiles {
+		if profiles[i].ID == input.ID {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return errors.New("saved connection not found")
+	}
+	current := profiles[index]
+	if input.Driver != current.Driver {
+		return errors.New("saved connection driver cannot be changed")
+	}
+	name := strings.TrimSpace(input.Name)
+	switch current.Driver {
+	case driverSQLite:
+		path := strings.TrimSpace(input.Path)
+		if path == "" {
+			return errors.New("database path is required")
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return fmt.Errorf("resolve database path: %w", err)
+		}
+		if stat, err := os.Stat(abs); err != nil {
+			return fmt.Errorf("open database: %w", err)
+		} else if stat.IsDir() {
+			return errors.New("selected path is a directory")
+		}
+		if name == "" {
+			name = strings.TrimSuffix(filepath.Base(abs), filepath.Ext(abs))
+		}
+		profiles[index] = SavedConnection{ID: current.ID, Name: name, Driver: driverSQLite, Path: abs}
+	case driverPostgres:
+		normalized, err := normalizePostgresConfig(PostgresConfig{
+			Name: input.Name, Host: input.Host, Port: input.Port, User: input.User,
+			Database: input.Database, SSLMode: input.SSLMode, ReadOnly: input.ReadOnly,
+		})
+		if err != nil {
+			return err
+		}
+		if name == "" {
+			name = normalized.Database
+		}
+		hasPassword := current.HasPassword
+		if input.SavePassword && input.Password == "" && !current.HasPassword {
+			return errors.New("enter a password before enabling secure password storage")
+		}
+		if input.SavePassword && input.Password != "" {
+			if err := keyring.Set(keyringService, current.ID, input.Password); err != nil {
+				return fmt.Errorf("store password in system credential manager: %w", err)
+			}
+			hasPassword = true
+		} else if !input.SavePassword {
+			if err := keyring.Delete(keyringService, current.ID); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+				return fmt.Errorf("delete saved password: %w", err)
+			}
+			hasPassword = false
+		}
+		profiles[index] = SavedConnection{
+			ID: current.ID, Name: name, Driver: driverPostgres, Host: normalized.Host,
+			Port: normalized.Port, User: normalized.User, Database: normalized.Database,
+			SSLMode: normalized.SSLMode, ReadOnly: normalized.ReadOnly, HasPassword: hasPassword,
+		}
+	default:
+		return errors.New("unsupported saved connection driver")
+	}
+	return a.writeConnectionProfiles(profiles)
+}
+
 func (a *App) saveSQLiteProfile(path, name string) error {
 	a.profilesMu.Lock()
 	defer a.profilesMu.Unlock()
-	profiles, err := loadConnectionProfiles()
+	profiles, err := a.loadConnectionProfiles()
 	if err != nil {
 		return err
 	}
@@ -110,13 +233,13 @@ func (a *App) saveSQLiteProfile(path, name string) error {
 		}
 	}
 	profiles = append(profiles, SavedConnection{ID: newConnectionID(), Name: name, Driver: driverSQLite, Path: path})
-	return writeConnectionProfiles(profiles)
+	return a.writeConnectionProfiles(profiles)
 }
 
 func (a *App) savePostgresProfile(input PostgresConfig) error {
 	a.profilesMu.Lock()
 	defer a.profilesMu.Unlock()
-	profiles, err := loadConnectionProfiles()
+	profiles, err := a.loadConnectionProfiles()
 	if err != nil {
 		return err
 	}
@@ -144,11 +267,11 @@ func (a *App) savePostgresProfile(input PostgresConfig) error {
 		}
 	}
 	next = append(next, profile)
-	return writeConnectionProfiles(next)
+	return a.writeConnectionProfiles(next)
 }
 
-func loadConnectionProfiles() ([]SavedConnection, error) {
-	path, err := connectionProfilesPath()
+func (a *App) loadConnectionProfiles() ([]SavedConnection, error) {
+	path, err := a.connectionProfilesPath()
 	if err != nil {
 		return nil, err
 	}
@@ -166,8 +289,8 @@ func loadConnectionProfiles() ([]SavedConnection, error) {
 	return profiles, nil
 }
 
-func writeConnectionProfiles(profiles []SavedConnection) error {
-	path, err := connectionProfilesPath()
+func (a *App) writeConnectionProfiles(profiles []SavedConnection) error {
+	path, err := a.connectionProfilesPath()
 	if err != nil {
 		return err
 	}
@@ -181,12 +304,12 @@ func writeConnectionProfiles(profiles []SavedConnection) error {
 	return os.WriteFile(path, data, 0o600)
 }
 
-func connectionProfilesPath() (string, error) {
-	dir, err := os.UserConfigDir()
+func (a *App) connectionProfilesPath() (string, error) {
+	dir, err := a.appDataDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "QueryNest", "connections.json"), nil
+	return filepath.Join(dir, "connections.json"), nil
 }
 
 func newConnectionID() string {

@@ -12,7 +12,7 @@ import (
 // carry its ID so an in-flight read or write can never follow a UI tab switch.
 func (a *App) openSession(connect func(*App) (ConnectionStatus, error)) (ConnectionStatus, error) {
 	child := NewApp()
-	child.ctx, child.profilesMu = a.ctx, a.profilesMu
+	child.ctx, child.profilesMu, child.dataDirOverride = a.ctx, a.profilesMu, a.dataDirOverride
 	status, err := connect(child)
 	if err != nil || !status.Connected {
 		_ = child.closeDB()
@@ -57,6 +57,11 @@ func (a *App) OpenDemoSession() (ConnectionStatus, error) {
 }
 
 func (a *App) OpenPostgresSession(config PostgresConfig) (ConnectionStatus, error) {
+	var err error
+	config, err = a.restoreSavedPassword(config)
+	if err != nil {
+		return ConnectionStatus{}, err
+	}
 	return a.openSession(func(child *App) (ConnectionStatus, error) { return child.ConnectPostgres(config) })
 }
 
@@ -175,12 +180,28 @@ func (a *App) SessionListTables(id string) ([]TableSummary, error) {
 	return child.ListTables()
 }
 
+func (a *App) SessionCountTableRows(id, schema, table string) (int64, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return 0, err
+	}
+	return child.CountTableRows(schema, table)
+}
+
 func (a *App) SessionGetTableSchema(id, schema, table string) ([]ColumnInfo, error) {
 	child, err := a.databaseSession(id)
 	if err != nil {
 		return nil, err
 	}
 	return child.GetTableSchema(schema, table)
+}
+
+func (a *App) SessionGetTableIndexes(id, schema, table string) ([]IndexInfo, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return nil, err
+	}
+	return child.GetTableIndexes(schema, table)
 }
 
 func (a *App) SessionGetTableData(id, schema, table string, limit, offset int, filter, sortColumn, sortDirection string) (TableData, error) {

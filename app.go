@@ -29,21 +29,23 @@ const (
 )
 
 type App struct {
-	configMu       sync.Mutex
-	configPath     string
-	ctx            context.Context
-	mu             sync.RWMutex
-	profilesMu     *sync.Mutex
-	sessionsMu     sync.RWMutex
-	sessions       map[string]*App
-	sessionOrder   []string
-	sessionID      string
-	postgresConfig *PostgresConfig
-	db             *sql.DB
-	path           string
-	name           string
-	driver         string
-	readOnly       bool
+	configMu         sync.Mutex
+	configPath       string
+	dataDirOverride  string
+	legacyConfigPath string
+	ctx              context.Context
+	mu               sync.RWMutex
+	profilesMu       *sync.Mutex
+	sessionsMu       sync.RWMutex
+	sessions         map[string]*App
+	sessionOrder     []string
+	sessionID        string
+	postgresConfig   *PostgresConfig
+	db               *sql.DB
+	path             string
+	name             string
+	driver           string
+	readOnly         bool
 }
 
 type ConnectionStatus struct {
@@ -83,6 +85,15 @@ type ColumnInfo struct {
 	Nullable   bool   `json:"nullable"`
 	PrimaryKey bool   `json:"primaryKey"`
 	Default    any    `json:"default"`
+}
+
+type IndexInfo struct {
+	Name    string   `json:"name"`
+	Type    string   `json:"type"`
+	Columns []string `json:"columns"`
+	Unique  bool     `json:"unique"`
+	Primary bool     `json:"primary"`
+	Partial bool     `json:"partial"`
 }
 
 type TableData struct {
@@ -380,6 +391,7 @@ func (a *App) ListTables() ([]TableSummary, error) {
 			_ = rows.Close()
 			return nil, err
 		}
+		item.Rows = -1
 		result = append(result, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -387,13 +399,25 @@ func (a *App) ListTables() ([]TableSummary, error) {
 		return nil, err
 	}
 	_ = rows.Close()
-	for i := range result {
-		qualified := qualifiedIdentifier(result[i].Schema, result[i].Name)
-		if err := db.QueryRow(`SELECT count(*) FROM ` + qualified).Scan(&result[i].Rows); err != nil {
-			result[i].Rows = -1
-		}
-	}
 	return result, nil
+}
+
+func (a *App) CountTableRows(schema, table string) (int64, error) {
+	db, driver, err := a.connection()
+	if err != nil {
+		return 0, err
+	}
+	if schema == "" {
+		schema = defaultSchema(driver)
+	}
+	if err := ensureTable(db, driver, schema, table); err != nil {
+		return 0, err
+	}
+	var count int64
+	if err := db.QueryRow(`SELECT count(*) FROM ` + qualifiedIdentifier(schema, table)).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count rows in %s.%s: %w", schema, table, err)
+	}
+	return count, nil
 }
 
 func (a *App) GetTableSchema(schema, table string) ([]ColumnInfo, error) {
@@ -426,6 +450,23 @@ func (a *App) GetTableSchema(schema, table string) ([]ColumnInfo, error) {
 		columns = append(columns, c)
 	}
 	return columns, rows.Err()
+}
+
+func (a *App) GetTableIndexes(schema, table string) ([]IndexInfo, error) {
+	db, driver, err := a.connection()
+	if err != nil {
+		return nil, err
+	}
+	if schema == "" {
+		schema = defaultSchema(driver)
+	}
+	if err := ensureTable(db, driver, schema, table); err != nil {
+		return nil, err
+	}
+	if driver == driverPostgres {
+		return postgresTableIndexes(db, schema, table)
+	}
+	return sqliteTableIndexes(db, schema, table)
 }
 
 func (a *App) GetTableData(schema, table string, limit, offset int, filter, sortColumn, sortDirection string) (TableData, error) {
@@ -632,6 +673,115 @@ func postgresTableSchema(db *sql.DB, schema, table string) ([]ColumnInfo, error)
 		columns = append(columns, column)
 	}
 	return columns, rows.Err()
+}
+
+func sqliteTableIndexes(db *sql.DB, schema, table string) ([]IndexInfo, error) {
+	rows, err := db.Query(`PRAGMA ` + quoteIdentifier(schema) + `.index_list(` + quoteIdentifier(table) + `)`)
+	if err != nil {
+		return nil, fmt.Errorf("list indexes: %w", err)
+	}
+	indexes := make([]IndexInfo, 0)
+	for rows.Next() {
+		var sequence, unique, partial int
+		var index IndexInfo
+		var origin string
+		if err := rows.Scan(&sequence, &index.Name, &unique, &origin, &partial); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("read index: %w", err)
+		}
+		index.Type = "btree"
+		index.Columns = make([]string, 0)
+		index.Unique = unique != 0
+		index.Primary = origin == "pk"
+		index.Partial = partial != 0
+		indexes = append(indexes, index)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("list indexes: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close index list: %w", err)
+	}
+	for i := range indexes {
+		columns, err := db.Query(`PRAGMA ` + quoteIdentifier(schema) + `.index_xinfo(` + quoteIdentifier(indexes[i].Name) + `)`)
+		if err != nil {
+			return nil, fmt.Errorf("inspect index %q: %w", indexes[i].Name, err)
+		}
+		for columns.Next() {
+			var sequence, columnID, descending, key int
+			var name, collation sql.NullString
+			if err := columns.Scan(&sequence, &columnID, &name, &descending, &collation, &key); err != nil {
+				_ = columns.Close()
+				return nil, fmt.Errorf("read index %q column: %w", indexes[i].Name, err)
+			}
+			if key == 0 {
+				continue
+			}
+			switch {
+			case name.Valid:
+				indexes[i].Columns = append(indexes[i].Columns, name.String)
+			case columnID == -1:
+				indexes[i].Columns = append(indexes[i].Columns, "rowid")
+			default:
+				indexes[i].Columns = append(indexes[i].Columns, "(expression)")
+			}
+		}
+		if err := columns.Err(); err != nil {
+			_ = columns.Close()
+			return nil, fmt.Errorf("inspect index %q: %w", indexes[i].Name, err)
+		}
+		if err := columns.Close(); err != nil {
+			return nil, fmt.Errorf("close index %q columns: %w", indexes[i].Name, err)
+		}
+	}
+	return indexes, nil
+}
+
+func postgresTableIndexes(db *sql.DB, schema, table string) ([]IndexInfo, error) {
+	rows, err := db.Query(`
+		SELECT index_class.relname,
+		       access_method.amname,
+		       indexed.indisunique,
+		       indexed.indisprimary,
+		       indexed.indpred IS NOT NULL,
+		       key.position,
+		       pg_get_indexdef(indexed.indexrelid, key.position::integer, true)
+		FROM pg_catalog.pg_index indexed
+		JOIN pg_catalog.pg_class table_class ON table_class.oid = indexed.indrelid
+		JOIN pg_catalog.pg_namespace namespace ON namespace.oid = table_class.relnamespace
+		JOIN pg_catalog.pg_class index_class ON index_class.oid = indexed.indexrelid
+		JOIN pg_catalog.pg_am access_method ON access_method.oid = index_class.relam
+		CROSS JOIN LATERAL unnest(indexed.indkey) WITH ORDINALITY AS key(attribute_number, position)
+		WHERE namespace.nspname = $1
+		  AND table_class.relname = $2
+		  AND key.position <= indexed.indnkeyatts
+		ORDER BY index_class.relname, key.position`, schema, table)
+	if err != nil {
+		return nil, fmt.Errorf("list indexes: %w", err)
+	}
+	defer rows.Close()
+	indexes := make([]IndexInfo, 0)
+	positions := make(map[string]int)
+	for rows.Next() {
+		var name, indexType, column string
+		var unique, primary, partial bool
+		var position int
+		if err := rows.Scan(&name, &indexType, &unique, &primary, &partial, &position, &column); err != nil {
+			return nil, fmt.Errorf("read index: %w", err)
+		}
+		indexPosition, ok := positions[name]
+		if !ok {
+			indexPosition = len(indexes)
+			positions[name] = indexPosition
+			indexes = append(indexes, IndexInfo{Name: name, Type: indexType, Columns: make([]string, 0), Unique: unique, Primary: primary, Partial: partial})
+		}
+		indexes[indexPosition].Columns = append(indexes[indexPosition].Columns, column)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list indexes: %w", err)
+	}
+	return indexes, nil
 }
 
 func scanRows(rows *sql.Rows) (TableData, error) { return scanRowsLimited(rows, maxPageSize) }

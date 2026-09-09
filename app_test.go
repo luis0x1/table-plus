@@ -28,6 +28,18 @@ func TestListTablesAndSchema(t *testing.T) {
 	if len(tables) != 3 {
 		t.Fatalf("got %d objects, want 3", len(tables))
 	}
+	for _, table := range tables {
+		if table.Rows != -1 {
+			t.Fatalf("ListTables eagerly counted %s: %d", table.Name, table.Rows)
+		}
+	}
+	count, err := app.CountTableRows("main", "customers")
+	if err != nil || count != 8 {
+		t.Fatalf("count customers: got %d, %v", count, err)
+	}
+	if _, err := app.CountTableRows("main", `customers"; DROP TABLE customers; --`); err == nil {
+		t.Fatal("expected invalid table count to be rejected")
+	}
 
 	columns, err := app.GetTableSchema("main", "customers")
 	if err != nil {
@@ -35,6 +47,36 @@ func TestListTablesAndSchema(t *testing.T) {
 	}
 	if len(columns) != 6 || columns[0].Name != "id" || !columns[0].PrimaryKey {
 		t.Fatalf("unexpected customer schema: %#v", columns)
+	}
+}
+
+func TestSQLiteTableIndexes(t *testing.T) {
+	app := openTestApp(t)
+	if _, err := app.db.Exec(`CREATE UNIQUE INDEX customers_company_status_idx ON customers(company, status) WHERE company IS NOT NULL`); err != nil {
+		t.Fatal(err)
+	}
+	indexes, err := app.GetTableIndexes("main", "customers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *IndexInfo
+	for i := range indexes {
+		if indexes[i].Name == "customers_company_status_idx" {
+			found = &indexes[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("custom index missing from %#v", indexes)
+	}
+	if !found.Unique || !found.Partial || found.Primary || found.Type != "btree" {
+		t.Fatalf("unexpected index properties: %#v", found)
+	}
+	if len(found.Columns) != 2 || found.Columns[0] != "company" || found.Columns[1] != "status" {
+		t.Fatalf("unexpected index columns: %#v", found.Columns)
+	}
+	if _, err := app.GetTableIndexes("main", "missing_table"); err == nil {
+		t.Fatal("expected an unknown table to be rejected")
 	}
 }
 
@@ -185,8 +227,8 @@ func TestApplyTruncate(t *testing.T) {
 }
 
 func TestSavedSQLiteProfile(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	app := NewApp()
+	app.dataDirOverride = t.TempDir()
 	if err := app.saveSQLiteProfile("/tmp/example.db", "Example"); err != nil {
 		t.Fatal(err)
 	}
