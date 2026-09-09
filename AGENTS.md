@@ -63,6 +63,8 @@ Use `rg` for exact text searches after CodeGraph has identified the relevant are
 - Never store database passwords in profile JSON or source files. Use the operating-system credential manager.
 - JSON previews must not determine column width; long values are clipped with an ellipsis and open in the JSON viewer.
 - Preserve Appearance settings for global font size and font family, persisted sidebar widths, the application motion system, and `prefers-reduced-motion` behavior.
+- Entry animations end at the element's natural state, so they use `animation-fill-mode: backwards`, never `forwards` or `both`. A retained end state outranks every later declaration, which silently kills hover and active `transform` rules, and a retained identity transform makes the element a stacking context and a containing block for `position: fixed` descendants. That is what painted the database dropdown underneath the main panel.
+- Staggered lists take their delay from a `--stagger` custom property set by the component, capped with `min(...)`. Hardcoded `:nth-child` delay chains stop at whatever index someone wrote, leaving every later row to animate at once, and virtualized grids shift the count with their spacer rows.
 - Material Symbols use the Rounded family. `VITE_ICON_WEIGHT` is a build-time setting and must accept only 100, 200, 300, 400, 500, 600, or 700; changing it must visibly change the emitted icon path data.
 
 ## Grid interaction invariants

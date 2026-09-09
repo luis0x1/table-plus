@@ -239,7 +239,7 @@ export default function DataGrid(raw: DataGridProps) {
             const rowIndex = () => firstRow() + offset
             const meta = () => props.rowMeta[rowIndex()]
             const rowID = () => meta()?.id ?? ''
-            return <tr class={`draft-${meta()?.kind ?? 'clean'} ${selected().has(rowID()) ? 'selected' : ''} ${rowIndex() % 2 ? 'even' : ''}`} aria-rowindex={virtualized() ? rowIndex() + 2 : undefined}>
+            return <tr class={`draft-${meta()?.kind ?? 'clean'} ${selected().has(rowID()) ? 'selected' : ''} ${rowIndex() % 2 ? 'even' : ''}`} style={{ '--stagger': String(offset) }} aria-rowindex={virtualized() ? rowIndex() + 2 : undefined}>
               <td class="row-number"><button class="row-selector" disabled={!props.onSelect || (meta()?.kind !== 'insert' && !meta()?.canEdit)} onClick={() => { const current = meta(); if (current) props.onSelect?.(current.id) }}>{selected().has(rowID()) ? <Check size={11}/> : props.rowOffset + rowIndex() + 1}</button></td>
               <Index each={shown()}>{item => {
                 const value = () => row()[item().source]

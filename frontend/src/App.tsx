@@ -536,7 +536,6 @@ function ConnectionSkeleton(props: { session: WorkspaceSession; active: boolean;
   return <div class={`database-workspace connection-skeleton ${failed() ? 'failed' : ''}`} hidden={!props.active} aria-busy={!failed()}>
     <div class="workspace">
       <aside class="sidebar" style={{ width: `${props.tableSidebar.width()}px`, 'flex-basis': `${props.tableSidebar.width()}px` }}>
-        <div class="brand"><div class="brand-mark"><Database size={18}/></div><span>QueryNest</span></div>
         <div class="connection-card skeleton-connection-card"><span class={`db-avatar ${props.session.driver === 'PostgreSQL' ? 'postgres' : ''}`}>{props.session.driver === 'PostgreSQL' ? 'PG' : 'SQ'}</span><span class="connection-text"><b>{props.session.name}</b><small>{failed() ? 'Connection failed' : 'Connecting…'}</small></span>{failed() ? <Alert size={16}/> : <Refresh size={16} class="spin"/>}</div>
         <div class="skeleton-sidebar-lines" aria-hidden="true"><i/><i/><i/><i/><i/></div>
       </aside>
@@ -1140,6 +1139,7 @@ function DatabaseWorkspace(props: {
       { label: 'Close all tabs', icon: <X size={15}/>, separator: true, danger: true, run: closeAllTabs },
     ]
     if (menu.kind === 'database') return [
+      { label: 'New connection', icon: <Plus size={15}/>, run: props.onNewConnection },
       { label: 'Back up database', icon: <Save size={15}/>, run: startBackup },
       ...(!status.readOnly ? [{ label: 'Restore database', icon: <Refresh size={15}/>, run: startRestore, separator: true, danger: true }] : []),
     ]
@@ -1160,14 +1160,13 @@ function DatabaseWorkspace(props: {
   return <div class="database-workspace" hidden={!props.active}>
     <div class="workspace">
       <Show when={sidebarOpen()}><aside class="sidebar" style={{ width: `${props.tableSidebar.width()}px`, 'flex-basis': `${props.tableSidebar.width()}px` }}>
-        <div class="brand"><div class="brand-mark"><Database size={18}/></div><span>QueryNest</span><button class="icon-button" aria-label="Database actions" onClick={event => showContextMenu(event, 'database', '')}><More size={17}/></button></div>
         <button class="connection-card" title={`${status.path}\nRight-click for backup and restore`} onClick={props.onNewConnection} onContextMenu={event => showContextMenu(event, 'database', '')}>
           <span class={`db-avatar ${status.driver === 'PostgreSQL' ? 'postgres' : ''}`}>{status.driver === 'PostgreSQL' ? 'PG' : 'SQ'}</span><span class="connection-text"><b>{status.name}</b><small><i class="online-dot"/> {status.driver} · {status.readOnly ? 'Read-only' : 'Editable'}</small></span><ChevronDown size={15}/>
         </button>
         <div class="side-search"><Search size={14}/><input ref={sidebarSearch} aria-label="Filter database objects" value={sidebarFilter()} onInput={e => setSidebarFilter(e.currentTarget.value)} placeholder="Filter objects"/><span class="search-shortcut" aria-hidden="true"><kbd><Command size={12}/></kbd><kbd>K</kbd></span></div>
         <div class="object-tree"><Show when={!loadingTables()} fallback={<SidebarSkeleton/>}>
-          <ObjectGroup label="Tables" count={tableItems().length}><For each={tableItems()}>{item => <ObjectRow item={item} countLoading={countingTables().has(tableKey(item))} active={activeTable() === tableKey(item)} selected={selectedTables().has(tableKey(item))} onClick={event => selectTable(event, item)} onContextMenu={event => showTableContextMenu(event, item)}/>}</For></ObjectGroup>
-          <ObjectGroup label="Views" count={viewItems().length}><For each={viewItems()}>{item => <ObjectRow item={item} countLoading={countingTables().has(tableKey(item))} active={activeTable() === tableKey(item)} selected={false} onClick={event => selectTable(event, item)} onContextMenu={event => showTableContextMenu(event, item)}/>}</For></ObjectGroup>
+          <ObjectGroup label="Tables" count={tableItems().length}><For each={tableItems()}>{(item, index) => <ObjectRow item={item} stagger={index()} countLoading={countingTables().has(tableKey(item))} active={activeTable() === tableKey(item)} selected={selectedTables().has(tableKey(item))} onClick={event => selectTable(event, item)} onContextMenu={event => showTableContextMenu(event, item)}/>}</For></ObjectGroup>
+          <ObjectGroup label="Views" count={viewItems().length}><For each={viewItems()}>{(item, index) => <ObjectRow item={item} stagger={index()} countLoading={countingTables().has(tableKey(item))} active={activeTable() === tableKey(item)} selected={false} onClick={event => selectTable(event, item)} onContextMenu={event => showTableContextMenu(event, item)}/>}</For></ObjectGroup>
         </Show></div>
         <div class="sidebar-footer"><DatabasePicker status={status} onSelect={props.onOpenDatabase}/><button onClick={() => refresh()} class="icon-button database-refresh" title="Refresh database" aria-label="Refresh database" disabled={loadingTables()}><Refresh size={15} class={loadingTables() ? 'spin' : ''}/></button><button onClick={disconnect} class="icon-button" title="Close database" aria-label="Close database"><X size={15}/></button></div>
         <SidebarResizeHandle label="Resize table sidebar" sizing={props.tableSidebar}/>
@@ -1182,7 +1181,7 @@ function DatabaseWorkspace(props: {
             return <Show when={item()}>{value => <button data-active={activeTable() === tab} title={`${value().schema}.${value().name}`} onClick={() => setActiveTable(tab)} onContextMenu={event => showContextMenu(event, 'tab', tab)} class={`tab ${activeTable() === tab ? 'active' : ''} ${changes() ? 'changed' : ''} ${pinned() ? 'pinned' : ''}`}>{pinned() ? <Pin size={13} class="tab-pin"/> : <Table size={14}/>}<b class="tab-label">{value().name}</b><Show when={changes() > 0}><i class="tab-change-dot" title={`${changes()} pending change(s)`}/></Show><span onClick={e => { e.stopPropagation(); closeTab(tab) }}><X size={13}/></span></button>}</Show>
           }}</For></TabStrip>
           <button class={`query-tab ${queryOpen() ? 'active' : ''}`} onClick={() => setQueryOpen(value => !value)}><Code size={15}/> SQL</button>
-          <button class="icon-button" onClick={props.onNewConnection}><Plus size={17}/></button>
+          <button class="icon-button" aria-label="Workspace actions" aria-haspopup="menu" title="Workspace actions" onClick={event => showContextMenu(event, 'database', '')}><More size={17}/></button>
         </div>
         <For each={tabs()}>{tab => {
           const item = () => tables().find(value => tableKey(value) === tab)
@@ -1263,8 +1262,8 @@ function ObjectGroup(props: { label: string; count: number; children: JSX.Elemen
   return <div class={`object-group ${open() ? 'open' : ''}`}><button class="group-title" onClick={() => setOpen(value => !value)} aria-expanded={open()}>{open() ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}<span>{props.label}</span><em>{props.count}</em></button><Show when={open()}><div class="object-children">{props.children}</div></Show></div>
 }
 
-function ObjectRow(props: { item: TableSummary; active: boolean; selected: boolean; countLoading: boolean; onClick: (event: MouseEventOn<HTMLButtonElement>) => void; onContextMenu: (event: MouseEventOn<HTMLButtonElement>) => void }) {
-  return <button title={`${props.item.schema}.${props.item.name}`} aria-selected={props.selected} class={`object-row ${props.active ? 'active' : ''} ${props.selected ? 'selected' : ''}`} onClick={props.onClick} onContextMenu={props.onContextMenu}>{props.item.type === 'view' ? <Eye size={14}/> : <Table size={14}/>}<span>{props.item.name}</span><small>{props.countLoading ? <i class="row-count-skeleton" aria-label="Loading row count"/> : props.item.rows >= 0 ? props.item.rows.toLocaleString() : '—'}</small></button>
+function ObjectRow(props: { item: TableSummary; stagger: number; active: boolean; selected: boolean; countLoading: boolean; onClick: (event: MouseEventOn<HTMLButtonElement>) => void; onContextMenu: (event: MouseEventOn<HTMLButtonElement>) => void }) {
+  return <button title={`${props.item.schema}.${props.item.name}`} aria-selected={props.selected} style={{ '--stagger': String(props.stagger) }} class={`object-row ${props.active ? 'active' : ''} ${props.selected ? 'selected' : ''}`} onClick={props.onClick} onContextMenu={props.onContextMenu}>{props.item.type === 'view' ? <Eye size={14}/> : <Table size={14}/>}<span>{props.item.name}</span><small>{props.countLoading ? <i class="row-count-skeleton" aria-label="Loading row count"/> : props.item.rows >= 0 ? props.item.rows.toLocaleString() : '—'}</small></button>
 }
 
 function ContextMenu(props: { x: number; y: number; label: string; actions: ContextMenuAction[]; onClose: () => void }) {
@@ -1340,12 +1339,12 @@ function SchemaView(props: { schema: ColumnInfo[]; indexes: IndexInfo[]; error: 
     <Show when={props.error}><div class="structure-error" role="alert"><Alert size={15}/><span>{props.error}</span></div></Show>
     <section class="structure-section">
       <header><h3>Columns</h3><span>{props.schema.length}</span></header>
-      <table class="schema-table"><thead><tr><th>Name</th><th>Type</th><th>Nullable</th><th>Default</th><th>Key</th></tr></thead><tbody><For each={props.schema}>{column => <tr><td><span class="field-icon">{column.primaryKey ? <Key size={13}/> : <Columns size={13}/>}</span><b>{column.name}</b></td><td><code>{column.type || 'ANY'}</code></td><td>{column.nullable ? 'YES' : 'NO'}</td><td>{column.default === null ? <span class="muted">—</span> : String(column.default)}</td><td>{column.primaryKey ? <span class="primary-key"><Key size={12}/> PRIMARY</span> : <span class="muted">—</span>}</td></tr>}</For></tbody></table>
+      <table class="schema-table"><thead><tr><th>Name</th><th>Type</th><th>Nullable</th><th>Default</th><th>Key</th></tr></thead><tbody><For each={props.schema}>{(column, index) => <tr style={{ '--stagger': String(index()) }}><td><span class="field-icon">{column.primaryKey ? <Key size={13}/> : <Columns size={13}/>}</span><b>{column.name}</b></td><td><code>{column.type || 'ANY'}</code></td><td>{column.nullable ? 'YES' : 'NO'}</td><td>{column.default === null ? <span class="muted">—</span> : String(column.default)}</td><td>{column.primaryKey ? <span class="primary-key"><Key size={12}/> PRIMARY</span> : <span class="muted">—</span>}</td></tr>}</For></tbody></table>
     </section>
     <section class="structure-section indexes-section">
       <header><h3>Indexes</h3><span>{props.indexes.length}</span></header>
       <Show when={props.indexes.length} fallback={<div class="empty-indexes"><Key size={17}/><span>No indexes</span></div>}>
-        <table class="schema-table indexes-table"><thead><tr><th>Name</th><th>Columns / Expressions</th><th>Type</th><th>Properties</th></tr></thead><tbody><For each={props.indexes}>{index => <tr><td><span class="field-icon"><Key size={13}/></span><b>{index.name}</b></td><td><code>{index.columns.join(', ') || '—'}</code></td><td>{index.type || '—'}</td><td><div class="index-properties"><Show when={index.primary}><span class="primary">PRIMARY</span></Show><Show when={index.unique}><span class="unique">UNIQUE</span></Show><Show when={index.partial}><span>PARTIAL</span></Show><Show when={!index.primary && !index.unique && !index.partial}><span>INDEX</span></Show></div></td></tr>}</For></tbody></table>
+        <table class="schema-table indexes-table"><thead><tr><th>Name</th><th>Columns / Expressions</th><th>Type</th><th>Properties</th></tr></thead><tbody><For each={props.indexes}>{(index, position) => <tr style={{ '--stagger': String(position()) }}><td><span class="field-icon"><Key size={13}/></span><b>{index.name}</b></td><td><code>{index.columns.join(', ') || '—'}</code></td><td>{index.type || '—'}</td><td><div class="index-properties"><Show when={index.primary}><span class="primary">PRIMARY</span></Show><Show when={index.unique}><span class="unique">UNIQUE</span></Show><Show when={index.partial}><span>PARTIAL</span></Show><Show when={!index.primary && !index.unique && !index.partial}><span>INDEX</span></Show></div></td></tr>}</For></tbody></table>
       </Show>
     </section>
   </div>
