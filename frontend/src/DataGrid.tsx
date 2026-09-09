@@ -1,4 +1,4 @@
-import { createEffect, createSignal, Index, mergeProps, on, onCleanup, onMount, Show, type JSX } from 'solid-js'
+import { createEffect, createSignal, Index, mergeProps, on, onCleanup, Show, type JSX } from 'solid-js'
 import type { ColumnInfo, RowOperation, TableData } from './types'
 import { Alert, ArrowDown, ArrowUp, Check, Code, Columns, X } from './icons'
 
@@ -137,13 +137,19 @@ export default function DataGrid(raw: DataGridProps) {
   const padTop = () => firstRow() * rowHeight()
   const padBottom = () => Math.max(0, (totalRows() - lastRow()) * rowHeight())
 
-  onMount(() => {
-    const onScroll = () => setScrollTop(scroller.scrollTop)
-    const resize = new ResizeObserver(() => setViewport(scroller.clientHeight))
-    scroller.addEventListener('scroll', onScroll, { passive: true })
-    resize.observe(scroller)
-    setViewport(scroller.clientHeight)
-    onCleanup(() => { scroller.removeEventListener('scroll', onScroll); resize.disconnect() })
+  // A result with no columns renders the fallback instead of the scroll
+  // container, so tracking has to wait for the element to exist and re-attach if
+  // the grid is later replaced.
+  createEffect(() => {
+    if (!props.data.columns.length) return
+    const element = scroller
+    if (!element) return
+    const onScroll = () => setScrollTop(element.scrollTop)
+    const resize = new ResizeObserver(() => setViewport(element.clientHeight))
+    element.addEventListener('scroll', onScroll, { passive: true })
+    resize.observe(element)
+    setViewport(element.clientHeight)
+    onCleanup(() => { element.removeEventListener('scroll', onScroll); resize.disconnect() })
   })
 
   // Measure a rendered row so the spacers follow the stylesheet rather than a copy of it.
