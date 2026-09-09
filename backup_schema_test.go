@@ -1,0 +1,315 @@
+package main
+
+import (
+	"database/sql"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func emptyTarget(t *testing.T) *App {
+	t.Helper()
+	app := NewApp()
+	path := filepath.Join(t.TempDir(), "empty.db")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.ConnectSQLite(path); err != nil {
+		t.Fatalf("connect empty database: %v", err)
+	}
+	t.Cleanup(func() { _ = app.Disconnect() })
+	return app
+}
+
+const richSQLiteSchema = `
+CREATE TABLE authors (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, born INTEGER CHECK (born > 1000));
+CREATE TABLE books (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	author_id INTEGER NOT NULL REFERENCES authors(id) ON DELETE CASCADE,
+	title TEXT NOT NULL COLLATE NOCASE,
+	price REAL DEFAULT 9.99,
+	tag TEXT DEFAULT 'new',
+	slug TEXT GENERATED ALWAYS AS (lower(title)) VIRTUAL,
+	UNIQUE (author_id, title)
+);
+CREATE INDEX books_lower_title_idx ON books (lower(title));
+CREATE INDEX books_cheap_idx ON books (price) WHERE price < 5;
+CREATE VIEW cheap_books AS SELECT title, price FROM books WHERE price < 5;
+CREATE VIEW cheap_titles AS SELECT title FROM cheap_books;
+CREATE TRIGGER books_touch AFTER INSERT ON books BEGIN UPDATE authors SET born = born WHERE id = NEW.author_id; END;
+INSERT INTO authors (name, born) VALUES ('Ursula', 1929), ('Iain', 1954);
+INSERT INTO books (author_id, title, price, tag) VALUES (1, 'Earthsea', 4.50, 'classic'), (2, 'Culture', 12.00, 'scifi');
+`
+
+func sqliteSchemaDump(t *testing.T, app *App) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	rows, err := app.db.Query(`SELECT type || ' ' || name, COALESCE(sql, '') FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, ddl string
+		if err := rows.Scan(&key, &ddl); err != nil {
+			t.Fatal(err)
+		}
+		out[key] = ddl
+	}
+	return out
+}
+
+func compareSchemas(t *testing.T, before, after map[string]string) {
+	t.Helper()
+	for key, want := range before {
+		got, ok := after[key]
+		if !ok {
+			t.Errorf("LOST %s", key)
+			continue
+		}
+		if got != want {
+			t.Errorf("CHANGED %s\n  source: %s\n  target: %s", key, want, got)
+		}
+	}
+	for key := range after {
+		if _, ok := before[key]; !ok {
+			t.Errorf("EXTRA %s", key)
+		}
+	}
+}
+
+func TestRestoreFidelity(t *testing.T) {
+	source := openTestApp(t)
+	if _, err := source.db.Exec(richSQLiteSchema); err != nil {
+		t.Fatalf("seed rich schema: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "rich.qnb")
+	if _, err := source.writeDatabaseBackup(path, 1); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	target := emptyTarget(t)
+	if _, err := target.RestoreDatabase(path); err != nil {
+		t.Fatalf("restore into empty database: %v", err)
+	}
+	compareSchemas(t, sqliteSchemaDump(t, source), sqliteSchemaDump(t, target))
+
+	// Restoring twice must converge rather than collide on existing objects.
+	if _, err := target.RestoreDatabase(path); err != nil {
+		t.Fatalf("second restore: %v", err)
+	}
+	compareSchemas(t, sqliteSchemaDump(t, source), sqliteSchemaDump(t, target))
+
+	var authors, books int
+	if err := target.db.QueryRow(`SELECT (SELECT count(*) FROM authors), (SELECT count(*) FROM books)`).Scan(&authors, &books); err != nil {
+		t.Fatal(err)
+	}
+	if authors != 2 || books != 2 {
+		t.Fatalf("restoring twice duplicated rows: authors=%d books=%d", authors, books)
+	}
+	// The generated column is not stored in the backup but must still compute.
+	var slug string
+	if err := target.db.QueryRow(`SELECT slug FROM books WHERE title = 'Earthsea'`).Scan(&slug); err != nil || slug != "earthsea" {
+		t.Fatalf("generated column: %q, %v", slug, err)
+	}
+	// Foreign keys came back, so a cascade works.
+	if _, err := target.db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.db.Exec(`DELETE FROM authors WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := target.db.QueryRow(`SELECT count(*) FROM books`).Scan(&books); err != nil {
+		t.Fatal(err)
+	}
+	if books != 1 {
+		t.Fatalf("ON DELETE CASCADE was not restored: %d books remain", books)
+	}
+}
+
+// --- PostgreSQL ------------------------------------------------------------
+// Gated on QUERYNEST_PG_HOST so the suite does not need a live server. Run with:
+//
+//	QUERYNEST_PG_HOST=localhost QUERYNEST_PG_USER=... QUERYNEST_PG_PASSWORD=... \
+//	  go test -run TestPostgresRestoreFidelity
+
+func postgresTestConfig(t *testing.T, database string) (PostgresConfig, bool) {
+	t.Helper()
+	host := os.Getenv("QUERYNEST_PG_HOST")
+	if host == "" {
+		return PostgresConfig{}, false
+	}
+	return PostgresConfig{
+		Name: "test", Host: host, Port: 5432,
+		User: os.Getenv("QUERYNEST_PG_USER"), Password: os.Getenv("QUERYNEST_PG_PASSWORD"),
+		Database: database, SSLMode: "disable",
+	}, true
+}
+
+const richPostgresSchema = `
+CREATE TYPE mood AS ENUM ('happy', 'sad');
+CREATE TABLE authors (
+	id integer GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+	name text NOT NULL UNIQUE,
+	born integer CONSTRAINT authors_born_check CHECK (born > 1000),
+	feeling mood DEFAULT 'happy'
+);
+CREATE TABLE books (
+	id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+	author_id integer NOT NULL,
+	title text NOT NULL,
+	price numeric(10,2) DEFAULT 9.99,
+	slug text GENERATED ALWAYS AS (lower(title)) STORED,
+	CONSTRAINT books_author_fk FOREIGN KEY (author_id) REFERENCES authors(id) ON DELETE CASCADE,
+	CONSTRAINT books_title_unique UNIQUE (author_id, title)
+);
+CREATE INDEX books_lower_title_idx ON books (lower(title));
+CREATE INDEX books_cheap_idx ON books (price) WHERE price < 5;
+CREATE VIEW cheap_books AS SELECT title, price FROM books WHERE price < 5;
+CREATE VIEW cheap_titles AS SELECT title FROM cheap_books;
+CREATE FUNCTION touch_author() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN UPDATE authors SET born = born WHERE id = NEW.author_id; RETURN NEW; END $$;
+CREATE TRIGGER books_touch AFTER INSERT ON books FOR EACH ROW EXECUTE FUNCTION touch_author();
+INSERT INTO authors (name, born) VALUES ('Ursula', 1929), ('Iain', 1954);
+INSERT INTO books (author_id, title, price) VALUES (1, 'Earthsea', 4.50), (2, 'Culture', 12.00);
+`
+
+// postgresSchemaDump renders the parts of a schema a restore has to reproduce.
+func postgresSchemaDump(t *testing.T, db *sql.DB) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	queries := map[string]string{
+		"column": `SELECT 'column ' || c.relname || '.' || a.attname,
+				format_type(a.atttypid, a.atttypmod) || ' notnull=' || a.attnotnull::text ||
+				' identity=' || a.attidentity::text || ' generated=' || a.attgenerated::text ||
+				' default=' || COALESCE(pg_get_expr(d.adbin, d.adrelid), '')
+			FROM pg_attribute a
+			JOIN pg_class c ON c.oid = a.attrelid
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+			WHERE n.nspname = 'public' AND c.relkind = 'r' AND a.attnum > 0 AND NOT a.attisdropped`,
+		"constraint": `SELECT 'constraint ' || co.conname, pg_get_constraintdef(co.oid)
+			FROM pg_constraint co JOIN pg_class c ON c.oid = co.conrelid
+			JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public'`,
+		"index": `SELECT 'index ' || indexname, indexdef FROM pg_indexes WHERE schemaname = 'public'`,
+		"view": `SELECT 'view ' || c.relname, pg_get_viewdef(c.oid, true)
+			FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE n.nspname = 'public' AND c.relkind IN ('v', 'm')`,
+		"trigger": `SELECT 'trigger ' || tgname, pg_get_triggerdef(t.oid, true)
+			FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE NOT t.tgisinternal AND n.nspname = 'public'`,
+		"routine": `SELECT 'routine ' || proname, pg_get_functiondef(p.oid)
+			FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'`,
+		"enum": `SELECT 'enum ' || t.typname, string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder)
+			FROM pg_type t JOIN pg_enum e ON e.enumtypid = t.oid
+			JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = 'public' GROUP BY t.typname`,
+	}
+	for label, query := range queries {
+		rows, err := db.Query(query)
+		if err != nil {
+			t.Fatalf("dump %s: %v", label, err)
+		}
+		for rows.Next() {
+			var key, value string
+			if err := rows.Scan(&key, &value); err != nil {
+				rows.Close()
+				t.Fatalf("dump %s: %v", label, err)
+			}
+			out[key] = value
+		}
+		rows.Close()
+	}
+	return out
+}
+
+func TestPostgresRestoreFidelity(t *testing.T) {
+	admin, ok := postgresTestConfig(t, "postgres")
+	if !ok {
+		t.Skip("set QUERYNEST_PG_HOST to run the PostgreSQL restore test")
+	}
+	adminDB, err := openPostgresDB(admin)
+	if err != nil {
+		t.Fatalf("connect admin database: %v", err)
+	}
+	defer adminDB.Close()
+	sourceName, targetName := "querynest_src", "querynest_dst"
+	for _, name := range []string{sourceName, targetName} {
+		if _, err := adminDB.Exec(`DROP DATABASE IF EXISTS ` + quoteIdentifier(name)); err != nil {
+			t.Fatalf("drop %s: %v", name, err)
+		}
+		if _, err := adminDB.Exec(`CREATE DATABASE ` + quoteIdentifier(name)); err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+	}
+	// Registered before the Disconnect defers, so it runs once they have closed.
+	// A fresh pool is needed because adminDB is closed by then.
+	t.Cleanup(func() {
+		cleanupDB, err := openPostgresDB(admin)
+		if err != nil {
+			t.Logf("could not reopen admin database to clean up: %v", err)
+			return
+		}
+		defer cleanupDB.Close()
+		for _, name := range []string{sourceName, targetName} {
+			if _, err := cleanupDB.Exec(`DROP DATABASE IF EXISTS ` + quoteIdentifier(name)); err != nil {
+				t.Logf("could not drop %s: %v", name, err)
+			}
+		}
+	})
+
+	sourceConfig, _ := postgresTestConfig(t, sourceName)
+	source := NewApp()
+	if _, err := source.ConnectPostgres(sourceConfig); err != nil {
+		t.Fatalf("connect source: %v", err)
+	}
+	defer source.Disconnect()
+	if _, err := source.db.Exec(richPostgresSchema); err != nil {
+		t.Fatalf("seed rich schema: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "pg.qnb")
+	if _, err := source.writeDatabaseBackup(path, 1); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+
+	targetConfig, _ := postgresTestConfig(t, targetName)
+	target := NewApp()
+	if _, err := target.ConnectPostgres(targetConfig); err != nil {
+		t.Fatalf("connect target: %v", err)
+	}
+	defer target.Disconnect()
+
+	result, err := target.RestoreDatabase(path)
+	if err != nil {
+		t.Fatalf("restore into empty database: %v", err)
+	}
+	t.Logf("restored %#v", result)
+	compareSchemas(t, postgresSchemaDump(t, source.db), postgresSchemaDump(t, target.db))
+
+	if _, err := target.RestoreDatabase(path); err != nil {
+		t.Fatalf("second restore: %v", err)
+	}
+	compareSchemas(t, postgresSchemaDump(t, source.db), postgresSchemaDump(t, target.db))
+
+	var authors, books int
+	if err := target.db.QueryRow(`SELECT (SELECT count(*) FROM authors), (SELECT count(*) FROM books)`).Scan(&authors, &books); err != nil {
+		t.Fatal(err)
+	}
+	if authors != 2 || books != 2 {
+		t.Fatalf("restoring twice duplicated rows: authors=%d books=%d", authors, books)
+	}
+	// Identity sequences must continue past the restored rows.
+	if _, err := target.db.Exec(`INSERT INTO authors (name, born) VALUES ('New', 2000)`); err != nil {
+		t.Fatalf("identity sequence was not reset: %v", err)
+	}
+	// The cascade proves the foreign key came back.
+	if _, err := target.db.Exec(`DELETE FROM authors WHERE name = 'Ursula'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := target.db.QueryRow(`SELECT count(*) FROM books`).Scan(&books); err != nil {
+		t.Fatal(err)
+	}
+	if books != 1 {
+		t.Fatalf("ON DELETE CASCADE was not restored: %d books remain", books)
+	}
+}

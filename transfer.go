@@ -22,8 +22,11 @@ import (
 )
 
 const (
-	queryNestBackupFormat  = "querynest-backup"
-	queryNestExportFormat  = "querynest-table-export"
+	queryNestBackupFormat = "querynest-backup"
+	queryNestExportFormat = "querynest-table-export"
+	// Version 2 archives the source database's own DDL. Version 1 backups only
+	// carried introspected column metadata and are still readable.
+	queryNestBackupVersion = 2
 	queryNestFormatVersion = 1
 	previewRowLimit        = 5
 )
@@ -75,11 +78,12 @@ type backupColumn struct {
 }
 
 type backupTable struct {
-	Schema  string         `json:"schema"`
-	Name    string         `json:"name"`
-	Columns []backupColumn `json:"columns"`
-	Indexes []IndexInfo    `json:"indexes"`
-	Rows    int64          `json:"rows"`
+	Schema           string         `json:"schema"`
+	Name             string         `json:"name"`
+	Columns          []backupColumn `json:"columns"`
+	Indexes          []IndexInfo    `json:"indexes"`
+	Rows             int64          `json:"rows"`
+	IdentityOverride bool           `json:"identityOverride,omitempty"`
 }
 
 type backupEnum struct {
@@ -89,14 +93,15 @@ type backupEnum struct {
 }
 
 type backupManifest struct {
-	Kind      string        `json:"kind"`
-	Format    string        `json:"format"`
-	Version   int           `json:"version"`
-	Driver    string        `json:"driver"`
-	Database  string        `json:"database"`
-	CreatedAt string        `json:"createdAt"`
-	Tables    []backupTable `json:"tables"`
-	Enums     []backupEnum  `json:"enums,omitempty"`
+	Kind      string         `json:"kind"`
+	Format    string         `json:"format"`
+	Version   int            `json:"version"`
+	Driver    string         `json:"driver"`
+	Database  string         `json:"database"`
+	CreatedAt string         `json:"createdAt"`
+	Tables    []backupTable  `json:"tables"`
+	Enums     []backupEnum   `json:"enums,omitempty"`
+	Objects   []backupObject `json:"objects,omitempty"`
 }
 
 type backupRecord struct {
@@ -193,7 +198,7 @@ func (a *App) writeDatabaseBackup(finalPath string, batchBytes int64) (result Tr
 	if err != nil {
 		return result, err
 	}
-	manifest := backupManifest{Kind: "manifest", Format: queryNestBackupFormat, Version: queryNestFormatVersion, Driver: driver, Database: preview.Database, CreatedAt: time.Now().UTC().Format(time.RFC3339), Tables: make([]backupTable, 0, len(preview.Tables))}
+	manifest := backupManifest{Kind: "manifest", Format: queryNestBackupFormat, Version: queryNestBackupVersion, Driver: driver, Database: preview.Database, CreatedAt: time.Now().UTC().Format(time.RFC3339), Tables: make([]backupTable, 0, len(preview.Tables))}
 	if driver == driverPostgres {
 		manifest.Enums, err = postgresBackupEnums(db)
 		if err != nil {
@@ -209,15 +214,33 @@ func (a *App) writeDatabaseBackup(finalPath string, batchBytes int64) (result Tr
 		if err != nil {
 			return result, fmt.Errorf("inspect indexes for %s.%s: %w", item.Schema, item.Name, err)
 		}
-		archived := make([]backupColumn, len(columns))
-		for i, column := range columns {
-			archived[i] = backupColumn{Name: column.Name, Type: column.Type, Nullable: column.Nullable, PrimaryKey: column.PrimaryKey}
-			if column.Default != nil {
-				value := fmt.Sprint(column.Default)
-				archived[i].Default = &value
+		generated := map[string]bool{}
+		identityOverride := false
+		if driver == driverPostgres {
+			generated, identityOverride, err = postgresColumnTraits(db, item.Schema, item.Name)
+			if err != nil {
+				return result, err
 			}
 		}
-		manifest.Tables = append(manifest.Tables, backupTable{Schema: item.Schema, Name: item.Name, Columns: archived, Indexes: indexes, Rows: item.Rows})
+		archived := make([]backupColumn, 0, len(columns))
+		for _, column := range columns {
+			// A generated column is derived from the others, so it is neither read
+			// nor written; the restored table definition recomputes it.
+			if generated[column.Name] {
+				continue
+			}
+			entry := backupColumn{Name: column.Name, Type: column.Type, Nullable: column.Nullable, PrimaryKey: column.PrimaryKey}
+			if column.Default != nil {
+				value := fmt.Sprint(column.Default)
+				entry.Default = &value
+			}
+			archived = append(archived, entry)
+		}
+		manifest.Tables = append(manifest.Tables, backupTable{Schema: item.Schema, Name: item.Name, Columns: archived, Indexes: indexes, Rows: item.Rows, IdentityOverride: identityOverride})
+	}
+	manifest.Objects, err = backupSchemaObjects(db, driver, manifest.Tables)
+	if err != nil {
+		return result, err
 	}
 	backupContext := a.ctx
 	if backupContext == nil {
@@ -428,7 +451,7 @@ func readBackupManifest(path string) (backupManifest, io.ReadCloser, error) {
 		_ = file.Close()
 		return backupManifest{}, nil, fmt.Errorf("read backup manifest: %w", err)
 	}
-	if manifest.Kind != "manifest" || manifest.Format != queryNestBackupFormat || manifest.Version != queryNestFormatVersion {
+	if manifest.Kind != "manifest" || manifest.Format != queryNestBackupFormat || manifest.Version < 1 || manifest.Version > queryNestBackupVersion {
 		_ = compressed.Close()
 		_ = file.Close()
 		return backupManifest{}, nil, errors.New("unsupported QueryNest backup format")
@@ -485,27 +508,84 @@ func (a *App) RestoreDatabase(path string) (TransferResult, error) {
 			}
 		}
 	}
+	for _, object := range manifest.Objects {
+		if err := validateBackupObject(object); err != nil {
+			return rollback(err)
+		}
+	}
 	for _, table := range manifest.Tables {
 		if err := ensureSafeBackupTable(table); err != nil {
 			return rollback(err)
 		}
-		exists, err := tableExistsTx(tx, driver, table.Schema, table.Name)
-		if err != nil {
-			return rollback(err)
+	}
+	if driver == driverPostgres {
+		created := make(map[string]bool, len(manifest.Tables))
+		for _, table := range manifest.Tables {
+			if created[table.Schema] {
+				continue
+			}
+			created[table.Schema] = true
+			if _, err := tx.Exec(`CREATE SCHEMA IF NOT EXISTS ` + quoteIdentifier(table.Schema)); err != nil {
+				return rollback(fmt.Errorf("create schema %s: %w", table.Schema, err))
+			}
 		}
-		if !exists {
+		// This restore adds its own foreign keys after the rows land, but the
+		// target schema may already carry deferrable ones.
+		if _, err := tx.Exec(`SET CONSTRAINTS ALL DEFERRED`); err != nil {
+			return rollback(fmt.Errorf("defer constraints for restore: %w", err))
+		}
+	}
+	if len(manifest.Objects) > 0 {
+		for _, object := range manifest.Objects {
+			if object.Kind != objectTable {
+				continue
+			}
+			exists, err := tableExistsTx(tx, driver, object.Schema, object.Name)
+			if err != nil {
+				return rollback(err)
+			}
+			if exists {
+				continue
+			}
+			if _, err := tx.Exec(object.SQL); err != nil {
+				return rollback(fmt.Errorf("create %s.%s: %w", object.Schema, object.Name, err))
+			}
+		}
+	} else {
+		// A version 1 backup only carries column metadata, so the table shape has
+		// to be rebuilt from it and cannot reproduce the source's constraints.
+		for _, table := range manifest.Tables {
+			exists, err := tableExistsTx(tx, driver, table.Schema, table.Name)
+			if err != nil {
+				return rollback(err)
+			}
+			if exists {
+				continue
+			}
 			for _, column := range table.Columns {
 				if strings.EqualFold(strings.TrimSpace(column.Type), "USER-DEFINED") {
 					return rollback(fmt.Errorf("create %s.%s: this backup only contains the legacy PostgreSQL type marker USER-DEFINED for column %s; create the table first or make a new backup with the corrected QueryNest version", table.Schema, table.Name, column.Name))
 				}
 			}
-			if driver == driverPostgres {
-				if _, err := tx.Exec(`CREATE SCHEMA IF NOT EXISTS ` + quoteIdentifier(table.Schema)); err != nil {
-					return rollback(fmt.Errorf("create schema %s: %w", table.Schema, err))
-				}
-			}
 			if _, err := tx.Exec(createArchivedTableSQL(driver, table)); err != nil {
 				return rollback(fmt.Errorf("create %s.%s: %w", table.Schema, table.Name, err))
+			}
+		}
+	}
+	if len(manifest.Objects) > 0 {
+		// The backup is authoritative for the objects it carries, so anything the
+		// target already has under those names is replaced. Dropping runs in
+		// reverse order, which is how a view built on another view comes first,
+		// and before the rows load so no index or constraint slows the insert or
+		// rejects an intermediate state.
+		for i := len(manifest.Objects) - 1; i >= 0; i-- {
+			object := manifest.Objects[i]
+			statement := dropBackupObjectSQL(driver, object)
+			if statement == "" {
+				continue
+			}
+			if _, err := tx.Exec(statement); err != nil {
+				return rollback(fmt.Errorf("replace %s %s: %w", object.Kind, object.Name, err))
 			}
 		}
 	}
@@ -543,7 +623,11 @@ func (a *App) RestoreDatabase(path string) (TransferResult, error) {
 		for j, column := range table.Columns {
 			columns[j], places[j] = quoteIdentifier(column.Name), placeholder(driver, j+1)
 		}
-		statements[i], err = tx.Prepare(`INSERT INTO ` + qualifiedIdentifier(table.Schema, table.Name) + ` (` + strings.Join(columns, ", ") + `) VALUES (` + strings.Join(places, ", ") + `)`)
+		overriding := ""
+		if driver == driverPostgres && table.IdentityOverride {
+			overriding = `OVERRIDING SYSTEM VALUE `
+		}
+		statements[i], err = tx.Prepare(`INSERT INTO ` + qualifiedIdentifier(table.Schema, table.Name) + ` (` + strings.Join(columns, ", ") + `) ` + overriding + `VALUES (` + strings.Join(places, ", ") + `)`)
 		if err != nil {
 			return rollback(fmt.Errorf("prepare restore for %s.%s: %w", table.Schema, table.Name, err))
 		}
@@ -590,9 +674,8 @@ func (a *App) RestoreDatabase(path string) (TransferResult, error) {
 	if driver == driverPostgres {
 		for _, table := range manifest.Tables {
 			for _, column := range table.Columns {
-				if column.Default == nil || !strings.Contains(strings.ToLower(*column.Default), "nextval(") {
-					continue
-				}
+				// An identity column carries no nextval default, so every column is
+				// asked for its sequence instead of guessing from the default.
 				var sequence sql.NullString
 				if err := tx.QueryRow(`SELECT pg_get_serial_sequence($1, $2)`, table.Schema+"."+table.Name, column.Name).Scan(&sequence); err != nil {
 					return rollback(fmt.Errorf("find sequence for %s.%s: %w", table.Name, column.Name, err))
@@ -608,22 +691,35 @@ func (a *App) RestoreDatabase(path string) (TransferResult, error) {
 			}
 		}
 	}
-	for _, table := range manifest.Tables {
-		for _, index := range table.Indexes {
-			if index.Primary || index.Partial || strings.HasPrefix(index.Name, "sqlite_autoindex_") || len(index.Columns) == 0 || slicesContain(index.Columns, "(expression)") {
+	if len(manifest.Objects) > 0 {
+		// Foreign keys, routines, indexes, views and triggers, in the order the
+		// backup recorded them, which is the order that satisfies dependencies.
+		for _, object := range manifest.Objects {
+			if object.Kind == objectTable {
 				continue
 			}
-			columns := make([]string, len(index.Columns))
-			for i, column := range index.Columns {
-				columns[i] = quoteIdentifier(column)
+			if _, err := tx.Exec(object.SQL); err != nil {
+				return rollback(fmt.Errorf("restore %s %s: %w", object.Kind, object.Name, err))
 			}
-			statement := `CREATE `
-			if index.Unique {
-				statement += `UNIQUE `
-			}
-			statement += `INDEX IF NOT EXISTS ` + quoteIdentifier(index.Name) + ` ON ` + qualifiedIdentifier(table.Schema, table.Name) + ` (` + strings.Join(columns, ", ") + `)`
-			if _, err := tx.Exec(statement); err != nil {
-				return rollback(fmt.Errorf("restore index %s: %w", index.Name, err))
+		}
+	} else {
+		for _, table := range manifest.Tables {
+			for _, index := range table.Indexes {
+				if index.Primary || index.Partial || strings.HasPrefix(index.Name, "sqlite_autoindex_") || len(index.Columns) == 0 || slicesContain(index.Columns, "(expression)") {
+					continue
+				}
+				columns := make([]string, len(index.Columns))
+				for i, column := range index.Columns {
+					columns[i] = quoteIdentifier(column)
+				}
+				statement := `CREATE `
+				if index.Unique {
+					statement += `UNIQUE `
+				}
+				statement += `INDEX IF NOT EXISTS ` + quoteIdentifier(index.Name) + ` ON ` + qualifiedIdentifier(table.Schema, table.Name) + ` (` + strings.Join(columns, ", ") + `)`
+				if _, err := tx.Exec(statement); err != nil {
+					return rollback(fmt.Errorf("restore index %s: %w", index.Name, err))
+				}
 			}
 		}
 	}

@@ -12,6 +12,8 @@ QueryNest is a TablePlus-inspired desktop database client built with Go, Wails v
 - `connections.go`: saved connection profiles and OS credential-manager integration.
 - `config.go`: persisted application, sidebar, appearance, data-operation, and editing preferences.
 - `data_edit.go`: validated insert, update, delete, and truncate operations applied in one transaction.
+- `transfer.go`: backup, restore, table export and import, plus truncate.
+- `backup_schema.go`: captures the source database's own DDL for a backup and builds the statements that replace it on restore.
 - `app_test.go`: backend and SQL-generation tests.
 - `frontend/src/App.tsx`: main UI, database workspaces, cached table panels, local drafts, unsaved-change guards, and undo/redo history.
 - `frontend/src/DataGrid.tsx`: the data grid, windowed row rendering, draft grid construction, column order/resize, cell editing, and the JSON viewer.
@@ -53,6 +55,11 @@ Use `rg` for exact text searches after CodeGraph has identified the relevant are
 - Validate table and column names against introspected schema before constructing write statements.
 - Keep SQLite and PostgreSQL identifier quoting, placeholders, schemas, and transaction behavior driver-aware.
 - Windows SQLite paths must remain valid file URIs; do not reintroduce `file://C:/...` authority parsing.
+- A backup must archive the source database's own DDL, never DDL rebuilt from introspected column metadata. Rebuilding silently drops foreign keys, CHECK and UNIQUE constraints, collations, generated columns, partial and expression indexes, views and triggers. SQLite stores `sqlite_master.sql` verbatim; PostgreSQL composes from `format_type`, `pg_get_constraintdef`, `pg_get_indexdef`, `pg_get_viewdef`, `pg_get_triggerdef` and `pg_get_functiondef`.
+- Restoring replays SQL from a file, so every archived object is checked against `backupObjectPrefixes` first and only triggers and routines may contain more than one statement. Treat a `.qnb` file as trusted input, the same as any SQL dump.
+- Restore order is fixed: schemas, enum types, tables, clear, rows, foreign keys, routines, indexes, views, triggers. Foreign keys are added after the rows so load order cannot violate them. Objects are dropped in reverse order first, which is what lets a restore run twice and what keeps a view built on another view from blocking the drop.
+- Generated columns are never read or written by a backup; the restored definition recomputes them. A PostgreSQL table with a `GENERATED ALWAYS AS IDENTITY` column needs `OVERRIDING SYSTEM VALUE` on the restore insert.
+- Backup format version 2 carries archived DDL. Version 1 files must keep restoring through the legacy rebuilt-DDL path. The backup version is separate from the table-export format version; do not merge the two constants.
 - Never store database passwords in profile JSON or source files. Use the operating-system credential manager.
 - JSON previews must not determine column width; long values are clipped with an ellipsis and open in the JSON viewer.
 - Preserve Appearance settings for global font size and font family, persisted sidebar widths, the application motion system, and `prefers-reduced-motion` behavior.
@@ -106,6 +113,12 @@ For backend changes, also run:
 
 ```bash
 go vet ./...
+```
+
+The PostgreSQL restore test needs a server and is skipped without one:
+
+```bash
+QUERYNEST_PG_HOST=localhost QUERYNEST_PG_USER=postgres QUERYNEST_PG_PASSWORD=... go test -run TestPostgresRestoreFidelity
 ```
 
 For a normal desktop build:
