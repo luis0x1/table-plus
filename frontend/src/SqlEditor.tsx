@@ -1,6 +1,5 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show, type JSX } from 'solid-js'
 import { completionContext, scanSql, sqlCompletions, statementsInRange, summarizeStatement, tableAliases, type Completion, type CompletionTable, type SqlStatement, type SqlToken } from './sql'
-import { Play } from './icons'
 
 type SqlEditorProps = {
   value: string
@@ -9,6 +8,8 @@ type SqlEditorProps = {
   onInput: (value: string) => void
   onRun: (statements: string[]) => void
   onSave?: () => void
+  /** Reports what a run would cover, so the panel header can drive the button. */
+  onRunListChange?: (statements: SqlStatement[]) => void
   /** Asks the workspace to load a table's columns the first time one is needed. */
   onNeedColumns?: (table: string) => void
 }
@@ -103,6 +104,8 @@ export default function SqlEditor(props: SqlEditorProps) {
   }
   createEffect(on(completionTarget, () => setHighlighted(0)))
 
+  createEffect(on(runList, statements => props.onRunListChange?.(statements)))
+
   const caretPosition = createMemo(() => {
     if (!completing() || !suggestions().length) return null
     const active = context()
@@ -146,13 +149,6 @@ export default function SqlEditor(props: SqlEditorProps) {
   // Replacing the document from outside, such as opening another script, leaves
   // the old scroll offset behind on the layer that does not scroll itself.
   createEffect(on(() => props.value, () => queueMicrotask(syncScroll), { defer: true }))
-
-  const runLabel = () => {
-    if (props.running) return 'Running…'
-    const count = runList().length
-    if (!count) return 'Run'
-    return count === 1 ? 'Run statement' : `Run ${count} statements`
-  }
 
   return <div class="editor-wrap">
     <div class="line-numbers" ref={gutter} aria-hidden="true">
@@ -206,8 +202,5 @@ export default function SqlEditor(props: SqlEditorProps) {
         <ol><For each={runList()}>{statement => <li>{summarizeStatement(statement.body)}</li>}</For></ol>
       </aside>
     </Show>
-    <button class="run-query" disabled={props.running || !runList().length} onClick={() => props.onRun(runList().map(statement => statement.body))}>
-      <Play size={14}/>{runLabel()}
-    </button>
   </div>
 }

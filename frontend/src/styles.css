@@ -281,6 +281,25 @@ kbd { padding: 1px 4px; border: 1px solid #2c323a; border-radius: 4px; color: #5
 .index-properties .unique { color: #78b9ee; border-color: rgba(73,145,207,.28); background: rgba(49,128,192,.08); }.index-properties .primary { color: #e3bc67; border-color: rgba(219,173,51,.25); background: rgba(206,157,39,.07); }
 .empty-indexes { height: 58px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 1px dashed #272d34; border-radius: 8px; color: #58626e; font-size: 10px; }
 
+/* The script surface: header, editor, and the last run's rows beneath it. Every
+   level sets min-height: 0 so the grid's own scroller ends up with a bounded
+   height and can actually scroll. */
+.script-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; background: #0f1216; animation: panel-in 300ms var(--ease-out) backwards; }
+.script-panel-head { height: 43px; flex: 0 0 43px; padding: 0 9px 0 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #242a31; background: #12151a; }
+.script-title { min-width: 0; display: flex; align-items: center; gap: 7px; color: #7d8793; font-size: .625rem; }
+.script-title b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c8cdd4; font-size: .75rem; font-weight: 620; }
+.script-title > span { flex: 0 0 auto; padding: 2px 5px; border-radius: 4px; color: #62caa8; background: rgba(55,186,143,.09); font-size: .5rem; text-transform: uppercase; }
+.script-panel-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; }
+.script-panel-actions button { height: 29px; padding: 0 10px; display: flex; align-items: center; gap: 6px; border-radius: 7px; font-size: .625rem; font-weight: 600; }
+.script-panel-actions .icon-button { width: 29px; padding: 0; }
+.script-panel-actions kbd { margin-left: 3px; padding: 1px 4px; border-radius: 4px; color: inherit; background: rgba(255,255,255,.13); font: 500 .5rem/1.5 var(--app-font-family); opacity: .8; }
+.script-panel-actions button:disabled { opacity: .45; }
+.script-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.script-body .editor-wrap { flex: 1 1 55%; min-height: 120px; border-right: 0; }
+.script-results { flex: 1 1 45%; min-height: 0; position: relative; display: flex; flex-direction: column; padding-top: 27px; border-top: 1px solid #272d34; background: #0f1216; }
+.script-results.empty { flex: 0 0 92px; }
+.script-results .grid-scroll { flex: 1; min-height: 0; height: auto; }
+.script-tab > svg { color: #8f7cde; }
 .query-panel.standalone { flex: 1; height: auto; border-top: 0; }
 .query-panel { flex: 0 0 298px; height: 298px; display: flex; flex-direction: column; border-top: 1px solid #303640; background: #101318; box-shadow: 0 -10px 30px rgba(0,0,0,.17); }
 .query-header { height: 37px; flex: 0 0 37px; display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 13px; border-bottom: 1px solid #242a31; }
