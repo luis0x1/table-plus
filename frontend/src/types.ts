@@ -32,6 +32,12 @@ export interface TransferTablePreview {
   rows: number
 }
 
+export interface ScriptFile {
+  name: string
+  size: number
+  modified: string
+}
+
 export interface TransferSkippedTable {
   schema: string
   name: string

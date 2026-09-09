@@ -6,7 +6,7 @@ import DatabasePicker from './DatabasePicker'
 import DataGrid, { buildDraftGrid, type PendingOperation } from './DataGrid'
 import useSidebarPreferences, { UNDO_HISTORY_RANGE } from './useSidebarPreferences'
 import SidebarResizeHandle, { useCompactSidebar, useSidebarWidth, type SidebarSizing } from './SidebarResizeHandle'
-import type { AppearancePreferences, ColumnInfo, ConnectionStatus, EditingPreferences, IndexInfo, PostgresConfig, QueryResult, SavedConnection, SavedConnectionUpdate, TableData, TableRef, TableSummary, TransferPreferences, TransferPreview, TransferResult } from './types'
+import type { AppearancePreferences, ColumnInfo, ConnectionStatus, EditingPreferences, IndexInfo, PostgresConfig, QueryResult, SavedConnection, SavedConnectionUpdate, ScriptFile, TableData, TableRef, TableSummary, TransferPreferences, TransferPreview, TransferResult } from './types'
 import { Alert, Check, ChevronDown, ChevronRight, Clock, Code, Columns, Command, Copy, Database, Edit, Eye, File, Filter, Key, More, PanelLeft, Pin, Play, Plus, Redo, Refresh, Save, Search, Settings, Table, Trash, Undo, X } from './icons'
 
 const emptyData = (): TableData => ({ columns: [], rows: [], total: 0, durationMs: 0 })
@@ -17,7 +17,7 @@ const MAX_NAVIGABLE_PAGES = 99_999
 const qualifiedKey = (schema: string, name: string) => `${schema}\u0000${name}`
 const tableKey = (item: TableSummary) => qualifiedKey(item.schema, item.name)
 type DraftHistory = { past: PendingOperation[][]; present: PendingOperation[]; future: PendingOperation[][] }
-type ContextMenuState = { kind: 'database' | 'table' | 'tab'; key: string; x: number; y: number }
+type ContextMenuState = { kind: 'database' | 'table' | 'tab' | 'script'; key: string; x: number; y: number }
 type ContextMenuAction = { label: string; icon: JSX.Element; run: () => void; danger?: boolean; separator?: boolean }
 type MouseEventOn<T extends Element> = MouseEvent & { currentTarget: T }
 type WorkspaceSession = ConnectionStatus & {
@@ -580,6 +580,15 @@ function DatabaseWorkspace(props: {
   const [confirmAction, setConfirmAction] = createSignal<{ title: string; message: string; run: () => Promise<void> } | null>(null)
   const closeContextMenu = () => setContextMenu(null)
   const [sidebarFilter, setSidebarFilter] = createSignal('')
+  const [pane, setPane] = createSignal<'data' | 'scripts'>('data')
+  const [scripts, setScripts] = createSignal<ScriptFile[]>([])
+  const [scriptsLoading, setScriptsLoading] = createSignal(true)
+  const [scriptWorkspace, setScriptWorkspace] = createSignal('')
+  const [activeScript, setActiveScript] = createSignal('')
+  // The last content written to disk, which is what makes the editor dirty.
+  const [savedScript, setSavedScript] = createSignal('')
+  const [renamingScript, setRenamingScript] = createSignal('')
+  const [scriptGuard, setScriptGuard] = createSignal<{ run: () => void | Promise<void> } | null>(null)
   const [loadingTables, setLoadingTables] = createSignal(true)
   const [countingTables, setCountingTables] = createSignal<Set<string>>(new Set())
   const [sidebarOpen, setSidebarOpen] = createSignal(true)
@@ -946,6 +955,96 @@ function DatabaseWorkspace(props: {
     guardUnsaved(key, 'Change sorting?', 'Sorting may replace rows that contain unsaved changes.', () => changeSortNow(key, column))
   }
 
+  const scriptDirty = () => Boolean(activeScript()) && query() !== savedScript()
+  const filteredScripts = createMemo(() => scripts().filter(script => script.name.toLowerCase().includes(sidebarFilter().toLowerCase())))
+
+  async function loadScripts() {
+    setScriptsLoading(true)
+    try { setScripts(await db.ListScripts() ?? []) }
+    catch (e) { setError(String(e)) }
+    finally { setScriptsLoading(false) }
+  }
+
+  // Scripts are only read once their pane is opened, so a database that never
+  // uses them never touches the file system.
+  createEffect(on(pane, current => {
+    if (current !== 'scripts') return
+    void loadScripts()
+    if (!scriptWorkspace()) db.ScriptWorkspacePath().then(setScriptWorkspace).catch(() => {})
+  }))
+
+  // Losing an unsaved script is the one thing this pane must never do quietly.
+  function guardScript(run: () => void | Promise<void>) {
+    if (scriptDirty()) setScriptGuard({ run })
+    else void run()
+  }
+
+  async function openScriptNow(name: string) {
+    try {
+      const content = await db.ReadScript(name)
+      batch(() => {
+        setActiveScript(name)
+        setSavedScript(content)
+        setQuery(content)
+        setQueryOpen(true)
+      })
+    } catch (e) { setError(String(e)) }
+  }
+
+  function openScript(name: string) {
+    if (name === activeScript()) { setQueryOpen(true); return }
+    guardScript(() => openScriptNow(name))
+  }
+
+  async function saveScript() {
+    const name = activeScript()
+    if (!name) return
+    const content = query()
+    try {
+      await db.SaveScript(name, content)
+      setSavedScript(content)
+      await loadScripts()
+    } catch (e) { setError(String(e)); throw e }
+  }
+
+  // A new script is created under a free default name and opened straight into
+  // rename, so naming is one step rather than a dialog before any content.
+  function newScript() {
+    guardScript(async () => {
+      const taken = new Set(scripts().map(script => script.name.toLowerCase()))
+      let name = 'untitled'
+      for (let n = 2; taken.has(`${name}.sql`); n++) name = `untitled ${n}`
+      try {
+        const created = await db.CreateScript(name)
+        await loadScripts()
+        await openScriptNow(created.name)
+        setRenamingScript(created.name)
+      } catch (e) { setError(String(e)) }
+    })
+  }
+
+  async function renameScript(from: string, to: string) {
+    setRenamingScript('')
+    if (!to.trim() || to === from) return
+    try {
+      const renamed = await db.RenameScript(from, to)
+      if (activeScript() === from) setActiveScript(renamed.name)
+      await loadScripts()
+    } catch (e) { setError(String(e)) }
+  }
+
+  function deleteScript(name: string) {
+    const remove = async () => {
+      try {
+        await db.DeleteScript(name)
+        if (activeScript() === name) batch(() => { setActiveScript(''); setSavedScript(''); setQuery('') })
+        await loadScripts()
+      } catch (e) { setError(String(e)) }
+    }
+    if (activeScript() === name) guardScript(remove)
+    else void remove()
+  }
+
   async function executeQuery() {
     setQueryRunning(true); setError('')
     try { setQueryResult(await db.ExecuteQuery(query())) }
@@ -1111,6 +1210,8 @@ function DatabaseWorkspace(props: {
         sidebarSearch?.select()
       } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault()
+        // The script editor is the surface in focus while it is open.
+        if (queryOpen() && scriptDirty()) { void saveScript().catch(() => {}); return }
         if (!guardedAction() && !saving && draftOperations(key).length) void saveChanges(key).catch(() => {})
       } else if (!isTextEditor && !guardedAction() && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
         event.preventDefault()
@@ -1138,6 +1239,11 @@ function DatabaseWorkspace(props: {
       { label: pinnedTabs().has(menu.key) ? 'Unpin tab' : 'Pin tab', icon: <Pin size={15}/>, run: () => togglePin(menu.key) },
       { label: 'Close all tabs', icon: <X size={15}/>, separator: true, danger: true, run: closeAllTabs },
     ]
+    if (menu.kind === 'script') return [
+      { label: 'Open script', icon: <Code size={15}/>, run: () => openScript(menu.key) },
+      { label: 'Rename script', icon: <Edit size={15}/>, run: () => setRenamingScript(menu.key) },
+      { label: 'Delete script', icon: <Trash size={15}/>, run: () => deleteScript(menu.key), separator: true, danger: true },
+    ]
     if (menu.kind === 'database') return [
       { label: 'New connection', icon: <Plus size={15}/>, run: props.onNewConnection },
       { label: 'Back up database', icon: <Save size={15}/>, run: startBackup },
@@ -1163,11 +1269,40 @@ function DatabaseWorkspace(props: {
         <button class="connection-card" title={`${status.path}\nRight-click for backup and restore`} onClick={props.onNewConnection} onContextMenu={event => showContextMenu(event, 'database', '')}>
           <span class={`db-avatar ${status.driver === 'PostgreSQL' ? 'postgres' : ''}`}>{status.driver === 'PostgreSQL' ? 'PG' : 'SQ'}</span><span class="connection-text"><b>{status.name}</b><small><i class="online-dot"/> {status.driver} · {status.readOnly ? 'Read-only' : 'Editable'}</small></span><ChevronDown size={15}/>
         </button>
-        <div class="side-search"><Search size={14}/><input ref={sidebarSearch} aria-label="Filter database objects" value={sidebarFilter()} onInput={e => setSidebarFilter(e.currentTarget.value)} placeholder="Filter objects"/><span class="search-shortcut" aria-hidden="true"><kbd><Command size={12}/></kbd><kbd>K</kbd></span></div>
+        <div class="sidebar-tabs" role="tablist" aria-label="Sidebar contents">
+          <button role="tab" aria-selected={pane() === 'data'} class={pane() === 'data' ? 'active' : ''} onClick={() => setPane('data')}><Table size={13}/> Data</button>
+          <button role="tab" aria-selected={pane() === 'scripts'} class={pane() === 'scripts' ? 'active' : ''} onClick={() => setPane('scripts')}><Code size={13}/> Scripts<Show when={scripts().length}><em>{scripts().length}</em></Show></button>
+        </div>
+        <div class="side-search"><Search size={14}/><input ref={sidebarSearch} aria-label={pane() === 'data' ? 'Filter database objects' : 'Filter scripts'} value={sidebarFilter()} onInput={e => setSidebarFilter(e.currentTarget.value)} placeholder={pane() === 'data' ? 'Filter objects' : 'Filter scripts'}/><span class="search-shortcut" aria-hidden="true"><kbd><Command size={12}/></kbd><kbd>K</kbd></span></div>
+        <Show when={pane() === 'data'} fallback={
+          <div class="object-tree script-pane">
+            <div class="script-pane-head"><span title={scriptWorkspace()}>Scripts</span><button class="icon-button" aria-label="New script" title="New script" onClick={newScript}><Plus size={15}/></button></div>
+            <Show when={!scriptsLoading()} fallback={<SidebarSkeleton/>}>
+              <Show when={filteredScripts().length} fallback={<p class="script-empty">{scripts().length ? 'No script matches this filter.' : 'No scripts yet. Create one to keep SQL alongside this connection.'}</p>}>
+                <For each={filteredScripts()}>{(script, index) =>
+                  <Show when={renamingScript() !== script.name} fallback={
+                    <input class="script-rename" value={script.name.replace(/\.sql$/i, '')} ref={el => queueMicrotask(() => { el.focus(); el.select() })}
+                      onBlur={event => void renameScript(script.name, event.currentTarget.value)}
+                      onKeyDown={event => {
+                        if (event.key === 'Enter') event.currentTarget.blur()
+                        if (event.key === 'Escape') { setRenamingScript(''); event.currentTarget.blur() }
+                      }}/>
+                  }>
+                    <button class={`object-row script-row ${activeScript() === script.name ? 'active' : ''}`} style={{ '--stagger': String(index()) }} title={`${script.name}\n${new Date(script.modified).toLocaleString()}`} onClick={() => openScript(script.name)} onContextMenu={event => showContextMenu(event, 'script', script.name)}>
+                      <File size={14}/><span>{script.name.replace(/\.sql$/i, '')}</span>
+                      <Show when={activeScript() === script.name && scriptDirty()}><i class="script-dirty" title="Unsaved changes"/></Show>
+                    </button>
+                  </Show>
+                }</For>
+              </Show>
+            </Show>
+          </div>
+        }>
         <div class="object-tree"><Show when={!loadingTables()} fallback={<SidebarSkeleton/>}>
           <ObjectGroup label="Tables" count={tableItems().length}><For each={tableItems()}>{(item, index) => <ObjectRow item={item} stagger={index()} countLoading={countingTables().has(tableKey(item))} active={activeTable() === tableKey(item)} selected={selectedTables().has(tableKey(item))} onClick={event => selectTable(event, item)} onContextMenu={event => showTableContextMenu(event, item)}/>}</For></ObjectGroup>
           <ObjectGroup label="Views" count={viewItems().length}><For each={viewItems()}>{(item, index) => <ObjectRow item={item} stagger={index()} countLoading={countingTables().has(tableKey(item))} active={activeTable() === tableKey(item)} selected={false} onClick={event => selectTable(event, item)} onContextMenu={event => showTableContextMenu(event, item)}/>}</For></ObjectGroup>
         </Show></div>
+        </Show>
         <div class="sidebar-footer"><DatabasePicker status={status} onSelect={props.onOpenDatabase}/><button onClick={() => refresh()} class="icon-button database-refresh" title="Refresh database" aria-label="Refresh database" disabled={loadingTables()}><Refresh size={15} class={loadingTables() ? 'spin' : ''}/></button><button onClick={disconnect} class="icon-button" title="Close database" aria-label="Close database"><X size={15}/></button></div>
         <SidebarResizeHandle label="Resize table sidebar" sizing={props.tableSidebar}/>
       </aside></Show>
@@ -1227,6 +1362,9 @@ function DatabaseWorkspace(props: {
                 setQuery={setQuery}
                 result={queryResult()}
                 running={queryRunning()}
+                scriptName={activeScript()}
+                dirty={scriptDirty()}
+                onSave={() => void saveScript().catch(() => {})}
                 onRun={executeQuery}
                 onClose={() => setQueryOpen(false)}
               /></Show>
@@ -1234,16 +1372,34 @@ function DatabaseWorkspace(props: {
           </Show>
         }}</For>
         <Show when={!activeTable()}>
-          <Show when={!loadingTables()} fallback={<WorkspaceSkeleton/>}><div class="no-table"><Table size={30}/><h3>Select a table</h3><p>Choose a table or view from the sidebar.</p></div></Show>
+          <Show when={queryOpen()} fallback={
+            <Show when={!loadingTables()} fallback={<WorkspaceSkeleton/>}><div class="no-table"><Table size={30}/><h3>Select a table</h3><p>Choose a table or view from the sidebar.</p></div></Show>
+          }>
+            <div class="table-activity"><QueryPanel
+              query={query()}
+              setQuery={setQuery}
+              result={queryResult()}
+              running={queryRunning()}
+              scriptName={activeScript()}
+              dirty={scriptDirty()}
+              standalone
+              onSave={() => void saveScript().catch(() => {})}
+              onRun={executeQuery}
+              onClose={() => setQueryOpen(false)}
+            /></div>
+          </Show>
         </Show>
       </section>
     </div>
     <Show when={error()}>{message => <Toast message={message()} onClose={() => setError('')}/>}</Show>
 
-    <Show when={contextMenu() && menuActions().length > 0}><ContextMenu x={contextMenu()!.x} y={contextMenu()!.y} label={contextMenu()!.kind === 'tab' ? 'Tab actions' : contextMenu()!.kind === 'database' ? 'Database actions' : 'Table actions'} actions={menuActions()} onClose={closeContextMenu}/></Show>
+    <Show when={contextMenu() && menuActions().length > 0}><ContextMenu x={contextMenu()!.x} y={contextMenu()!.y} label={contextMenu()!.kind === 'tab' ? 'Tab actions' : contextMenu()!.kind === 'database' ? 'Database actions' : contextMenu()!.kind === 'script' ? 'Script actions' : 'Table actions'} actions={menuActions()} onClose={closeContextMenu}/></Show>
 
     <Show when={guardedAction()}>{action =>
       <UnsavedModal title={action().title} message={action().message} count={guardedKeys().reduce((count, key) => count + draftOperations(key).length, 0)} onCancel={() => setGuardedAction(null)} onDiscard={async () => { const current = action(); const keys = guardedKeys(); keys.forEach(discardChanges); setGuardedAction(null); await current.run() }} onSave={async () => { const current = action(); const keys = guardedKeys(); try { for (const key of keys) await saveChanges(key); setGuardedAction(null); await current.run() } catch { /* Keep dialog open when save fails. */ } }}/>
+    }</Show>
+    <Show when={scriptGuard()}>{guard =>
+      <UnsavedModal title="Unsaved script" message={`${activeScript().replace(/\.sql$/i, '')} has changes that have not been saved.`} count={1} onCancel={() => setScriptGuard(null)} onDiscard={async () => { const action = guard(); setScriptGuard(null); await action.run() }} onSave={async () => { const action = guard(); try { await saveScript(); setScriptGuard(null); await action.run() } catch { /* Keep the dialog open when the save fails. */ } }}/>
     }</Show>
     <Show when={transferDialog()}>{dialog =>
       <TransferModal state={dialog()} busy={transferBusy()} onChange={setTransferDialog} onClose={() => setTransferDialog(null)} onRun={() => void runTransfer()}/>
@@ -1350,10 +1506,13 @@ function SchemaView(props: { schema: ColumnInfo[]; indexes: IndexInfo[]; error: 
   </div>
 }
 
-function QueryPanel(props: { query: string; setQuery: (value: string) => void; result: QueryResult | null; running: boolean; onRun: () => void; onClose: () => void }) {
+function QueryPanel(props: { query: string; setQuery: (value: string) => void; result: QueryResult | null; running: boolean; scriptName: string; dirty: boolean; standalone?: boolean; onSave: () => void; onRun: () => void; onClose: () => void }) {
   const lines = () => props.query.split('\n')
-  return <section class="query-panel">
-    <div class="query-header"><div><Code size={15}/><b>SQL Query</b><span>Read-only</span></div><div><span class="shortcut">⌘ ↵ to run</span><button class="icon-button" onClick={props.onClose}><X size={15}/></button></div></div>
+  return <section class={`query-panel ${props.standalone ? 'standalone' : ''}`}>
+    <div class="query-header">
+      <div><Code size={15}/><b>{props.scriptName ? props.scriptName.replace(/\.sql$/i, '') : 'SQL Query'}</b><Show when={props.dirty}><i class="script-dirty" title="Unsaved changes"/></Show><span>Read-only</span></div>
+      <div><Show when={props.scriptName}><button class="secondary query-save" disabled={!props.dirty} onClick={props.onSave}><Save size={14}/> Save<kbd>Ctrl S</kbd></button></Show><span class="shortcut">⌘ ↵ to run</span><button class="icon-button" onClick={props.onClose}><X size={15}/></button></div>
+    </div>
     <div class="query-workspace">
       <div class="editor-wrap"><div class="line-numbers"><Index each={lines()}>{(_line, index) => <span>{index + 1}</span>}</Index></div><textarea value={props.query} spellcheck={false} onInput={e => props.setQuery(e.currentTarget.value)} onKeyDown={e => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') props.onRun() }}/><button class="run-query" disabled={props.running} onClick={props.onRun}><Play size={14}/>{props.running ? 'Running…' : 'Run query'}</button></div>
       <div class="query-results"><Show when={props.result} fallback={<div class="result-placeholder"><Play size={20}/><span>Run the query to see results</span></div>}>{result => <><div class="result-meta"><Check size={13}/>{result().message}<span>{result().durationMs} ms</span></div><DataGrid data={result()} compact/></>}</Show></div>

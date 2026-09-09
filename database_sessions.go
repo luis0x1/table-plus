@@ -299,3 +299,59 @@ func (a *App) SessionTruncateTables(id string, tables []TableRef) (int64, error)
 	}
 	return child.TruncateTables(tables)
 }
+
+func (a *App) SessionScriptWorkspacePath(id string) (string, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return "", err
+	}
+	return child.ScriptWorkspacePath()
+}
+
+func (a *App) SessionListScripts(id string) ([]ScriptFile, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return nil, err
+	}
+	return child.ListScripts()
+}
+
+func (a *App) SessionReadScript(id, name string) (string, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return "", err
+	}
+	return child.ReadScript(name)
+}
+
+func (a *App) SessionCreateScript(id, name string) (ScriptFile, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return ScriptFile{}, err
+	}
+	return child.CreateScript(name)
+}
+
+func (a *App) SessionSaveScript(id, name, content string) (ScriptFile, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return ScriptFile{}, err
+	}
+	return child.SaveScript(name, content)
+}
+
+func (a *App) SessionRenameScript(id, from, to string) (ScriptFile, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return ScriptFile{}, err
+	}
+	return child.RenameScript(from, to)
+}
+
+func (a *App) SessionDeleteScript(id, name string) error {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return err
+	}
+	return child.DeleteScript(name)
+}

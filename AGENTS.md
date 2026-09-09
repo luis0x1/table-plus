@@ -12,6 +12,7 @@ QueryNest is a TablePlus-inspired desktop database client built with Go, Wails v
 - `connections.go`: saved connection profiles and OS credential-manager integration.
 - `config.go`: persisted application, sidebar, appearance, data-operation, and editing preferences.
 - `data_edit.go`: validated insert, update, delete, and truncate operations applied in one transaction.
+- `scripts.go`: per-connection SQL script workspaces on disk.
 - `transfer.go`: backup, restore, table export and import, plus truncate.
 - `backup_schema.go`: captures the source database's own DDL for a backup and builds the statements that replace it on restore.
 - `app_test.go`: backend and SQL-generation tests.
@@ -46,6 +47,11 @@ Use `rg` for exact text searches after CodeGraph has identified the relevant are
 - Preserve the connection skeleton while a database session is connecting, plus sidebar/workspace and row-count skeletons while metadata is loading. Loading must not flash stale content.
 - SQLite virtual tables such as `VirtualKNN`, `VirtualSpatialIndex` and `VirtualElementary` can require modules unavailable in the current build. Surface a clear per-table unavailable-module error. A backup must not fail because of one: virtual tables are detected from their `CREATE VIRTUAL TABLE` statement, left out of the archive, and listed in the preview with the module that provides them, so the omission is visible before the user runs it. Their shadow tables are ordinary tables and are still archived; do not exclude tables by guessing at shadow-table names, because that would silently drop real data. If support is added, bundle/register the supported extension in QueryNest; do not silently depend on a user-installed system extension.
 - Structure view includes both columns and indexes. Keep SQLite and PostgreSQL index introspection synchronized through Go methods, session forwarding, bridge types, browser mocks, and frontend rendering.
+- A script workspace belongs to a database, not to a saved profile, so scripts survive a connection being saved, renamed or re-created. The directory is `<appDataDir>/projects/<hash>`, where the hash covers the driver and path; `appDataDir` already resolves the desktop and portable locations, so scripts follow whichever the build uses.
+- Script names are written to the file system. Validate every one against `scriptNamePattern` before building a path, in create, read, save, rename and delete alike. Requiring a leading alphanumeric is what rules out `.` and `..`.
+- Saving a script writes to a temporary file and renames, so an interrupted save cannot leave a half-written script. Creating uses `O_EXCL` and renaming refuses an existing target, so neither can silently replace work.
+- An unsaved script is guarded the same way an unsaved grid draft is: switching scripts or deleting the open one asks before discarding.
+- The SQL panel doubles as the script editor and must work with no table tab open, where it renders standalone in place of the empty state.
 - Grid mutations remain local drafts until the user saves them. `Ctrl+S` applies the active table's draft atomically.
 - Undo history depth comes from the `editing.undoHistoryLimit` preference (10-1000, default 100), not a literal. Read it through `props.editingPreferences` so lowering it releases memory immediately.
 - Preserve draft colors: updates yellow, inserts green, deletes and truncates red.

@@ -1,4 +1,4 @@
-import type { AppConfig, AppearancePreferences, EditingPreferences, SidebarPreferences, ColumnInfo, ConnectionStatus, IndexInfo, PostgresConfig, QueryResult, RowOperation, SavedConnection, SavedConnectionUpdate, TableData, TableRef, TableSummary, TransferPreferences, TransferPreview, TransferResult } from './types'
+import type { AppConfig, AppearancePreferences, EditingPreferences, ScriptFile, SidebarPreferences, ColumnInfo, ConnectionStatus, IndexInfo, PostgresConfig, QueryResult, RowOperation, SavedConnection, SavedConnectionUpdate, TableData, TableRef, TableSummary, TransferPreferences, TransferPreview, TransferResult } from './types'
 
 type Backend = {
   LoadAppConfig(legacy: SidebarPreferences): Promise<AppConfig>
@@ -30,6 +30,13 @@ type Backend = {
   SessionChooseTableImport(id: string, table: TableRef): Promise<TransferPreview>
   SessionImportTable(id: string, table: TableRef, path: string, conflict: string): Promise<TransferResult>
   SessionTruncateTables(id: string, tables: TableRef[]): Promise<number>
+  SessionScriptWorkspacePath(id: string): Promise<string>
+  SessionListScripts(id: string): Promise<ScriptFile[]>
+  SessionReadScript(id: string, name: string): Promise<string>
+  SessionCreateScript(id: string, name: string): Promise<ScriptFile>
+  SessionSaveScript(id: string, name: string, content: string): Promise<ScriptFile>
+  SessionRenameScript(id: string, from: string, to: string): Promise<ScriptFile>
+  SessionDeleteScript(id: string, name: string): Promise<void>
   GetStatus(): Promise<ConnectionStatus>
   ChooseSQLiteFile(): Promise<ConnectionStatus>
   ConnectSQLite(path: string): Promise<ConnectionStatus>
@@ -99,6 +106,24 @@ function mockSession(id: string) {
   if (!session) throw new Error('Database session is closed.')
   return session
 }
+// The browser preview keeps scripts in localStorage so the pane can be built
+// and reviewed without the desktop file system.
+const previewScriptsKey = 'querynest:preview-scripts'
+function previewScripts(): Record<string, { content: string; modified: string }> {
+  try { return JSON.parse(localStorage.getItem(previewScriptsKey) ?? '{}') } catch { return {} }
+}
+function savePreviewScripts(scripts: Record<string, { content: string; modified: string }>) {
+  localStorage.setItem(previewScriptsKey, JSON.stringify(scripts))
+}
+function previewScriptName(name: string) {
+  const base = name.trim().replace(/\.sql$/i, '')
+  if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/.test(base)) throw new Error(`"${name}" is not a valid script name`)
+  return `${base}.sql`
+}
+function previewScriptFile(name: string, entry: { content: string; modified: string }): ScriptFile {
+  return { name, size: new TextEncoder().encode(entry.content).length, modified: entry.modified }
+}
+
 const mock: Backend = {
   async LoadAppConfig(legacy) {
     const config = mockAppConfig(legacy)
@@ -141,6 +166,51 @@ const mock: Backend = {
   async SessionChooseTableImport() { throw new Error('File selection is available in the desktop app.') },
   async SessionImportTable() { return { path: 'preview.csv', tables: 1, rows: 0, skipped: 0 } },
   async SessionTruncateTables(_id, tables) { return tables.length },
+  async SessionScriptWorkspacePath(id) { mockSession(id); return '~/Library/Application Support/QueryNest/projects/preview' },
+  async SessionListScripts(id) {
+    mockSession(id)
+    const scripts = previewScripts()
+    return Object.keys(scripts).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())).map(name => previewScriptFile(name, scripts[name]))
+  },
+  async SessionReadScript(id, name) {
+    mockSession(id)
+    const entry = previewScripts()[previewScriptName(name)]
+    if (!entry) throw new Error(`open script ${name}: no such file`)
+    return entry.content
+  },
+  async SessionCreateScript(id, name) {
+    mockSession(id)
+    const scripts = previewScripts()
+    const key = previewScriptName(name)
+    if (scripts[key]) throw new Error(`a script named ${key} already exists`)
+    scripts[key] = { content: '', modified: new Date().toISOString() }
+    savePreviewScripts(scripts)
+    return previewScriptFile(key, scripts[key])
+  },
+  async SessionSaveScript(id, name, content) {
+    mockSession(id)
+    const scripts = previewScripts()
+    const key = previewScriptName(name)
+    scripts[key] = { content, modified: new Date().toISOString() }
+    savePreviewScripts(scripts)
+    return previewScriptFile(key, scripts[key])
+  },
+  async SessionRenameScript(id, from, to) {
+    mockSession(id)
+    const scripts = previewScripts()
+    const source = previewScriptName(from)
+    const target = previewScriptName(to)
+    if (source !== target && scripts[target]) throw new Error(`a script named ${target} already exists`)
+    if (source !== target) { scripts[target] = scripts[source]; delete scripts[source] }
+    savePreviewScripts(scripts)
+    return previewScriptFile(target, scripts[target])
+  },
+  async SessionDeleteScript(id, name) {
+    mockSession(id)
+    const scripts = previewScripts()
+    delete scripts[previewScriptName(name)]
+    savePreviewScripts(scripts)
+  },
   async GetStatus() { return { id: '', database: mockConnected ? 'querynest-demo' : '', connected: mockConnected, name: mockConnected ? 'querynest-demo' : '', path: mockConnected ? '~/querynest-demo.db' : '', driver: 'SQLite', readOnly: false } },
   async ChooseSQLiteFile() { mockConnected = true; return this.GetStatus() },
   async ConnectSQLite() { mockConnected = true; return this.GetStatus() },
@@ -206,6 +276,13 @@ export function databaseApi(id: string) {
     ChooseTableImport: (table: TableRef) => backend.SessionChooseTableImport(id, table),
     ImportTable: (table: TableRef, path: string, conflict: string) => backend.SessionImportTable(id, table, path, conflict),
     TruncateTables: (tables: TableRef[]) => backend.SessionTruncateTables(id, tables),
+    ScriptWorkspacePath: () => backend.SessionScriptWorkspacePath(id),
+    ListScripts: () => backend.SessionListScripts(id),
+    ReadScript: (name: string) => backend.SessionReadScript(id, name),
+    CreateScript: (name: string) => backend.SessionCreateScript(id, name),
+    SaveScript: (name: string, content: string) => backend.SessionSaveScript(id, name, content),
+    RenameScript: (from: string, to: string) => backend.SessionRenameScript(id, from, to),
+    DeleteScript: (name: string) => backend.SessionDeleteScript(id, name),
   }
 }
 
