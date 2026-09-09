@@ -227,3 +227,75 @@ func (a *App) SessionApplyChanges(id, schema, table string, operations []RowOper
 	}
 	return child.ApplyChanges(schema, table, operations)
 }
+
+func (a *App) SessionPreviewDatabaseBackup(id string) (TransferPreview, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return TransferPreview{}, err
+	}
+	return child.PreviewDatabaseBackup()
+}
+
+func (a *App) SessionBackupDatabase(id string, batchSizeMB int64) (TransferResult, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return TransferResult{}, err
+	}
+	return child.BackupDatabase(batchSizeMB)
+}
+
+func (a *App) SessionChooseRestoreBackup(id string) (TransferPreview, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return TransferPreview{}, err
+	}
+	return child.ChooseRestoreBackup()
+}
+
+func (a *App) SessionRestoreDatabase(id, path string) (TransferResult, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return TransferResult{}, err
+	}
+	return child.RestoreDatabase(path)
+}
+
+func (a *App) SessionPreviewTableExport(id string, tables []TableRef) (TransferPreview, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return TransferPreview{}, err
+	}
+	return child.PreviewTableExport(tables)
+}
+
+func (a *App) SessionExportTables(id string, tables []TableRef, format string) (TransferResult, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return TransferResult{}, err
+	}
+	return child.ExportTables(tables, format)
+}
+
+func (a *App) SessionChooseTableImport(id string, table TableRef) (TransferPreview, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return TransferPreview{}, err
+	}
+	return child.ChooseTableImport(table)
+}
+
+func (a *App) SessionImportTable(id string, table TableRef, path, conflict string) (TransferResult, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return TransferResult{}, err
+	}
+	return child.ImportTable(table, path, conflict)
+}
+
+func (a *App) SessionTruncateTables(id string, tables []TableRef) (int64, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return 0, err
+	}
+	return child.TruncateTables(tables)
+}

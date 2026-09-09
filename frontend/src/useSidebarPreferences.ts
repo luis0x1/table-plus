@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './bridge'
-import type { AppearancePreferences, SidebarPreferences } from './types'
+import type { AppearancePreferences, SidebarPreferences, TransferPreferences } from './types'
 
 export const DEFAULT_APPEARANCE: AppearancePreferences = { fontSize: 17, fontFamily: 'system' }
+export const DEFAULT_TRANSFER: TransferPreferences = { backupBatchSizeMB: 500 }
 
 export const FONT_STACKS: Record<AppearancePreferences['fontFamily'], string> = {
   system: 'Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
@@ -24,6 +25,7 @@ function legacyPreferences(): SidebarPreferences {
 export default function useSidebarPreferences(onError: (message: string) => void) {
   const [values, setValues] = useState(legacyPreferences)
   const [appearance, setAppearanceState] = useState(DEFAULT_APPEARANCE)
+  const [transfer, setTransferState] = useState(DEFAULT_TRANSFER)
   const latest = useRef(values)
   const [ready, setReady] = useState(false)
   const saves = useRef(Promise.resolve())
@@ -35,6 +37,7 @@ export default function useSidebarPreferences(onError: (message: string) => void
       latest.current = config.sidebars
       setValues(config.sidebars)
       setAppearanceState(config.appearance)
+      setTransferState(config.transfer)
       setReady(true)
     }).catch(error => {
       if (!cancelled) onError(`Could not load application settings: ${String(error)}`)
@@ -73,5 +76,14 @@ export default function useSidebarPreferences(onError: (message: string) => void
     })
   }, [ready, onError])
 
-  return { values, setScale, commit, appearance, setAppearance, ready }
+  const setTransfer = useCallback((next: TransferPreferences) => {
+    const normalized = { backupBatchSizeMB: Math.max(1, Math.min(10240, Math.round(next.backupBatchSizeMB))) }
+    setTransferState(normalized)
+    if (!ready) return
+    saves.current = saves.current.then(() => api().SaveTransferPreferences(normalized)).catch(error => {
+      onError(`Could not save data operation settings: ${String(error)}`)
+    })
+  }, [ready, onError])
+
+  return { values, setScale, commit, appearance, setAppearance, transfer, setTransfer, ready }
 }

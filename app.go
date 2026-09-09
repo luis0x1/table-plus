@@ -641,25 +641,34 @@ func sqliteDSN(path string, readOnly bool) string {
 
 func postgresTableSchema(db *sql.DB, schema, table string) ([]ColumnInfo, error) {
 	rows, err := db.Query(`
-		SELECT c.column_name,
-		       c.data_type,
-		       c.is_nullable = 'YES',
-		       c.column_default,
+		SELECT attribute.attname,
+		       CASE
+		         WHEN data_type.typtype IN ('e', 'd')
+		           THEN quote_ident(type_namespace.nspname) || '.' || quote_ident(data_type.typname)
+		         ELSE pg_catalog.format_type(attribute.atttypid, attribute.atttypmod)
+		       END,
+		       NOT attribute.attnotnull,
+		       pg_catalog.pg_get_expr(default_value.adbin, default_value.adrelid),
 		       EXISTS (
 		         SELECT 1
-		         FROM information_schema.table_constraints tc
-		         JOIN information_schema.key_column_usage kcu
-		           ON tc.constraint_name = kcu.constraint_name
-		          AND tc.table_schema = kcu.table_schema
-		          AND tc.table_name = kcu.table_name
-		         WHERE tc.constraint_type = 'PRIMARY KEY'
-		           AND tc.table_schema = c.table_schema
-		           AND tc.table_name = c.table_name
-		           AND kcu.column_name = c.column_name
+		         FROM pg_catalog.pg_index indexed
+		         WHERE indexed.indrelid = table_class.oid
+		           AND indexed.indisprimary
+		           AND attribute.attnum = ANY(indexed.indkey)
 		       )
-		FROM information_schema.columns c
-		WHERE c.table_schema = $1 AND c.table_name = $2
-		ORDER BY c.ordinal_position`, schema, table)
+		FROM pg_catalog.pg_attribute attribute
+		JOIN pg_catalog.pg_class table_class ON table_class.oid = attribute.attrelid
+		JOIN pg_catalog.pg_namespace table_namespace ON table_namespace.oid = table_class.relnamespace
+		JOIN pg_catalog.pg_type data_type ON data_type.oid = attribute.atttypid
+		JOIN pg_catalog.pg_namespace type_namespace ON type_namespace.oid = data_type.typnamespace
+		LEFT JOIN pg_catalog.pg_attrdef default_value
+		  ON default_value.adrelid = attribute.attrelid
+		 AND default_value.adnum = attribute.attnum
+		WHERE table_namespace.nspname = $1
+		  AND table_class.relname = $2
+		  AND attribute.attnum > 0
+		  AND NOT attribute.attisdropped
+		ORDER BY attribute.attnum`, schema, table)
 	if err != nil {
 		return nil, err
 	}

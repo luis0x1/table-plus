@@ -1,20 +1,21 @@
-import { Activity, createRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import { Activity, createRef, useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, databaseApi, isDesktop, windowAction } from './bridge'
 import TabStrip from './TabStrip'
 import DatabasePicker from './DatabasePicker'
+import DataGrid, { buildDraftGrid, type PendingOperation } from './DataGrid'
 import useSidebarPreferences from './useSidebarPreferences'
 import SidebarResizeHandle, { useCompactSidebar, useSidebarWidth, type SidebarSizing } from './SidebarResizeHandle'
-import type { AppearancePreferences, ColumnInfo, ConnectionStatus, IndexInfo, PostgresConfig, QueryResult, RowOperation, SavedConnection, SavedConnectionUpdate, TableData, TableSummary } from './types'
-import { Alert, ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Clock, Code, Columns, Command, Copy, Database, Edit, Eye, File, Filter, Key, More, PanelLeft, Pin, Play, Plus, Redo, Refresh, Save, Search, Settings, Table, Trash, Undo, X } from './icons'
+import type { AppearancePreferences, ColumnInfo, ConnectionStatus, IndexInfo, PostgresConfig, QueryResult, SavedConnection, SavedConnectionUpdate, TableData, TableRef, TableSummary, TransferPreferences, TransferPreview, TransferResult } from './types'
+import { Alert, Check, ChevronDown, ChevronRight, Clock, Code, Columns, Command, Copy, Database, Edit, Eye, File, Filter, Key, More, PanelLeft, Pin, Play, Plus, Redo, Refresh, Save, Search, Settings, Table, Trash, Undo, X } from './icons'
 
 const EMPTY_DATA: TableData = { columns: [], rows: [], total: 0, durationMs: 0 }
 const PAGE_SIZE = 50
 const ROW_COUNT_CONCURRENCY = 3
+const QUICK_PAGE_ITEM_WIDTH = 70
+const MAX_NAVIGABLE_PAGES = 99_999
 const tableKey = (item: TableSummary) => `${item.schema}\u0000${item.name}`
-type PendingOperation = RowOperation & { id: string }
-type GridRowMeta = { id: string; kind: 'clean' | 'update' | 'insert' | 'delete'; canEdit: boolean; primaryKey: Record<string, unknown>; baseIndex?: number }
 type DraftHistory = { past: PendingOperation[][]; present: PendingOperation[]; future: PendingOperation[][] }
-type ContextMenuState = { kind: 'table' | 'tab'; key: string; x: number; y: number }
+type ContextMenuState = { kind: 'database' | 'table' | 'tab'; key: string; x: number; y: number }
 type ContextMenuAction = { label: string; icon: React.ReactNode; run: () => void; danger?: boolean; separator?: boolean }
 type WorkspaceSession = ConnectionStatus & {
   connectionState?: 'connecting' | 'failed'
@@ -68,169 +69,114 @@ function tableLoadError(error: unknown) {
   return message
 }
 
-function formatCell(value: unknown) {
-  if (value === null || value === undefined) return <span className="null-value">NULL</span>
-  if (typeof value === 'object') return JSON.stringify(value)
-  return String(value)
-}
-
-function jsonText(value: unknown): string | null {
-  if (value !== null && typeof value === 'object') return JSON.stringify(value, null, 2)
-  if (typeof value !== 'string') return null
-  const trimmed = value.trim()
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null
-  try { return JSON.stringify(JSON.parse(trimmed), null, 2) } catch { return null }
-}
-
-function editedValue(text: string, original: unknown): unknown {
-  if (text.trim().toLowerCase() === 'null') return null
-  if (typeof original === 'number') { const number = Number(text); return Number.isNaN(number) ? text : number }
-  if (typeof original === 'boolean') return text.toLowerCase() === 'true'
-  return text
-}
-
-function primaryKeyFor(row: unknown[], columns: string[], schema: ColumnInfo[]) {
-  const key: Record<string, unknown> = {}
-  for (const info of schema.filter(column => column.primaryKey)) {
-    const index = columns.indexOf(info.name)
-    if (index >= 0) key[info.name] = row[index]
-  }
-  return key
-}
-
-function existingRowID(key: Record<string, unknown>, page: number, index: number) {
-  return Object.keys(key).length ? `row:${JSON.stringify(key)}` : `readonly:${page}:${index}`
-}
-
-function buildDraftGrid(data: TableData, schema: ColumnInfo[], operations: PendingOperation[], page: number): { data: TableData; meta: GridRowMeta[] } {
-  const truncate = operations.some(operation => operation.type === 'truncate')
-  const rows: unknown[][] = []
-  const meta: GridRowMeta[] = []
-  data.rows.forEach((baseRow, baseIndex) => {
-    const primaryKey = primaryKeyFor(baseRow, data.columns, schema)
-    const id = existingRowID(primaryKey, page, baseIndex)
-    const update = operations.find(operation => operation.id === id && operation.type === 'update')
-    const deleted = truncate || operations.some(operation => operation.id === id && operation.type === 'delete')
-    const row = data.columns.map((column, index) => update && column in update.values ? update.values[column] : baseRow[index])
-    rows.push(row)
-    meta.push({ id, kind: deleted ? 'delete' : update ? 'update' : 'clean', canEdit: !deleted && Object.keys(primaryKey).length > 0, primaryKey, baseIndex })
-  })
-  for (const operation of operations.filter(item => item.type === 'insert')) {
-    rows.push(data.columns.map(column => column in operation.values ? operation.values[column] : null))
-    meta.push({ id: operation.id, kind: 'insert', canEdit: true, primaryKey: {} })
-  }
-  return { data: { ...data, rows }, meta }
-}
-
-function DataGrid({ data, sortColumn, sortDirection, onSort, compact = false, layoutKey, editable = false, onUpdate, rowMeta = [], selected = new Set(), onSelect, rowOffset = 0 }: {
-  data: Pick<TableData, 'columns' | 'rows'> & Partial<Pick<TableData, 'total'>>
-  sortColumn?: string
-  sortDirection?: string
-  onSort?: (column: string) => void
-  compact?: boolean
-  layoutKey?: string
-  editable?: boolean
-  onUpdate?: (column: string, rowIndex: number, value: unknown) => Promise<void>
-  rowMeta?: GridRowMeta[]
-  selected?: Set<string>
-  onSelect?: (id: string) => void
-  rowOffset?: number
-}) {
-  const [order, setOrder] = useState<string[]>(data.columns)
-  const [widths, setWidths] = useState<Record<string, number>>({})
-  const [dragging, setDragging] = useState('')
-  const [editing, setEditing] = useState<{ row: number; column: string; text: string; original: unknown } | null>(null)
-  const [saving, setSaving] = useState(false)
-  const [jsonCell, setJsonCell] = useState<{ row: number; column: string; value: unknown } | null>(null)
-  const cancelBlurRef = useRef(false)
+function QuickPagePicker({ currentPage, totalPages, onSelect }: { currentPage: number; totalPages: number; onSelect: (page: number) => void }) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    let savedOrder: string[] = []
-    let savedWidths: Record<string, number> = {}
-    if (layoutKey) {
-      try {
-        const saved = JSON.parse(localStorage.getItem(`querynest:grid:${layoutKey}`) ?? '{}')
-        savedOrder = Array.isArray(saved.order) ? saved.order : []
-        savedWidths = saved.widths && typeof saved.widths === 'object' ? saved.widths : {}
-      } catch { /* Ignore a corrupt local preference. */ }
+    if (!open) return
+    const close = (event: PointerEvent) => { if (!rootRef.current?.contains(event.target as Node)) setOpen(false) }
+    const keyboard = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); setOpen(false) } }
+    document.addEventListener('pointerdown', close)
+    window.addEventListener('keydown', keyboard)
+    return () => {
+      document.removeEventListener('pointerdown', close)
+      window.removeEventListener('keydown', keyboard)
     }
-    const valid = savedOrder.filter(column => data.columns.includes(column))
-    setOrder([...valid, ...data.columns.filter(column => !valid.includes(column))])
-    setWidths(savedWidths)
-  }, [layoutKey, data.columns.join('\u0000')])
+  }, [open])
 
-  useEffect(() => {
-    if (layoutKey && order.length) localStorage.setItem(`querynest:grid:${layoutKey}`, JSON.stringify({ order, widths }))
-  }, [layoutKey, order, widths])
+  return <div ref={rootRef} className="quick-page-picker">
+    <button className="quick-page-trigger" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(value => !value)}>Page {currentPage} of {totalPages}</button>
+    {open && (
+      <QuickPagePopover currentPage={currentPage} totalPages={totalPages} onClose={() => setOpen(false)} onSelect={page => { setOpen(false); if (page !== currentPage) onSelect(page) }}/>
+    )}
+  </div>
+}
 
-  const shown = order.map(column => ({ column, source: data.columns.indexOf(column) })).filter(item => item.source >= 0)
-  const lastRowNumber = Math.max(1, data.total ?? 0, rowOffset + data.rows.length)
-  const rowNumberWidth = Math.max(52, 28 + String(lastRowNumber).length * 8)
-  const tableWidth = rowNumberWidth + shown.reduce((total, { column }) => total + (widths[column] ?? 160), 0)
+function QuickPagePopover({ currentPage, totalPages, onClose, onSelect }: { currentPage: number; totalPages: number; onClose: () => void; onSelect: (page: number) => void }) {
+  const visibleCount = Math.min(5, totalPages)
+  const [value, setValue] = useState(String(currentPage))
+  const [message, setMessage] = useState('')
+  const maxStart = Math.max(0, totalPages - visibleCount)
+  const initialStart = Math.min(maxStart, Math.max(0, currentPage - 1 - Math.floor(visibleCount / 2)))
+  const [windowStart, setWindowStart] = useState(initialStart)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const scrollerRef = useRef<HTMLDivElement>(null)
+  const inputID = useId()
+  const viewportWidth = visibleCount * QUICK_PAGE_ITEM_WIDTH
+  const virtualWidth = totalPages * QUICK_PAGE_ITEM_WIDTH
+  const maxScroll = Math.max(0, virtualWidth - viewportWidth)
+  const scrollForStart = (start: number) => maxStart ? start / maxStart * maxScroll : 0
 
-  function resize(event: React.PointerEvent, column: string) {
-    event.preventDefault(); event.stopPropagation()
-    const start = event.clientX; const initial = widths[column] ?? 160
-    const move = (next: PointerEvent) => setWidths(current => ({ ...current, [column]: Math.max(72, Math.min(600, initial + next.clientX - start)) }))
-    const up = () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', up) }
-    document.addEventListener('pointermove', move); document.addEventListener('pointerup', up)
+  useLayoutEffect(() => {
+    inputRef.current?.focus()
+    inputRef.current?.select()
+    if (scrollerRef.current) scrollerRef.current.scrollLeft = scrollForStart(initialStart)
+  // The virtual geometry is fixed for the lifetime of an open popover.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  function submit(event: React.FormEvent) {
+    event.preventDefault()
+    const page = Number(value)
+    if (!Number.isInteger(page) || page < 1 || page > totalPages) {
+      setMessage(`Enter a whole number from 1 to ${totalPages.toLocaleString()}.`)
+      inputRef.current?.select()
+      return
+    }
+    onSelect(page)
   }
 
-  function dropColumn(target: string) {
-    if (!dragging || dragging === target) return setDragging('')
-    setOrder(current => {
-      const next = current.filter(column => column !== dragging)
-      next.splice(next.indexOf(target), 0, dragging)
-      return next
-    })
-    setDragging('')
+  function moveWindow(next: number) {
+    const start = Math.min(maxStart, Math.max(0, next))
+    setWindowStart(start)
+    if (scrollerRef.current) scrollerRef.current.scrollLeft = scrollForStart(start)
   }
 
-  async function commitEdit() {
-    if (!editing || !onUpdate || editing.text === String(editing.original ?? '')) return setEditing(null)
-    setSaving(true)
-    try { await onUpdate(editing.column, editing.row, editedValue(editing.text, editing.original)); setEditing(null) }
-    catch { /* Parent surfaces the update error while keeping the editor open. */ }
-    finally { setSaving(false) }
-  }
-
-  if (!data.columns.length) return <div className="empty-grid">No result columns</div>
-  return (
-    <div className={`grid-scroll ${compact ? 'compact' : ''}`}>
-      <table className="data-grid" style={{ width: tableWidth, minWidth: tableWidth }}>
-        <colgroup><col className="row-col" style={{ width: rowNumberWidth }}/>{shown.map(({ column }) => <col key={column} style={{ width: widths[column] ?? 160 }}/>)}</colgroup>
-        <thead><tr><th className="row-number">#</th>{shown.map(({ column }, columnIndex) => (
-          <th key={column} aria-sort={onSort ? sortColumn === column ? sortDirection === 'asc' ? 'ascending' : 'descending' : 'none' : undefined} onClick={() => onSort?.(column)} draggable={Boolean(layoutKey)} onDragStart={() => setDragging(column)} onDragOver={event => event.preventDefault()} onDrop={() => dropColumn(column)} className={`${onSort ? 'sortable' : ''} ${dragging === column ? 'dragging' : ''}`}>
-            {layoutKey && columnIndex > 0 && <i className="column-resizer column-resizer-left" draggable={false} onClick={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()} onDragStart={event => { event.preventDefault(); event.stopPropagation() }} onPointerDown={event => resize(event, shown[columnIndex - 1].column)}/>}
-            <span>{column}</span>
-            {sortColumn === column && (sortDirection === 'asc' ? <ArrowUp size={13}/> : <ArrowDown size={13}/>)}
-            {layoutKey && <i className="column-resizer column-resizer-right" draggable={false} onClick={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()} onDragStart={event => { event.preventDefault(); event.stopPropagation() }} onPointerDown={event => resize(event, column)}/>}
-          </th>
-        ))}</tr></thead>
-        <tbody>{data.rows.map((row, rowIndex) => <tr key={rowMeta[rowIndex]?.id ?? rowIndex} className={`draft-${rowMeta[rowIndex]?.kind ?? 'clean'} ${selected.has(rowMeta[rowIndex]?.id ?? '') ? 'selected' : ''}`}>
-          <td className="row-number"><button className="row-selector" disabled={!onSelect || (rowMeta[rowIndex]?.kind !== 'insert' && !rowMeta[rowIndex]?.canEdit)} onClick={() => rowMeta[rowIndex] && onSelect?.(rowMeta[rowIndex].id)}>{selected.has(rowMeta[rowIndex]?.id ?? '') ? <Check size={11}/> : rowOffset + rowIndex + 1}</button></td>
-          {shown.map(({ column, source }) => {
-            const value = row[source]; const text = String(value ?? '')
-            const isStatus = column.toLowerCase() === 'status'; const json = jsonText(value)
-            const isEditing = editing?.row === rowIndex && editing.column === column
-            const canEdit = editable && (rowMeta[rowIndex]?.canEdit ?? true)
-            return <td key={column} className={canEdit ? 'editable-cell' : ''} onDoubleClick={() => { if (canEdit && onUpdate) { cancelBlurRef.current = false; setEditing({ row: rowIndex, column, text: String(value ?? ''), original: value }) } }}>
-              {isEditing ? <input className="cell-editor" autoFocus disabled={saving} value={editing.text} onChange={event => setEditing({ ...editing, text: event.target.value })} onKeyDown={event => {
-                if (event.key === 'Enter') event.currentTarget.blur()
-                if (event.key === 'Escape') { cancelBlurRef.current = true; setEditing(null); event.currentTarget.blur() }
-              }} onBlur={() => {
-                if (cancelBlurRef.current) { cancelBlurRef.current = false; return }
-                if (!saving) void commitEdit()
-              }}/>
-              : json ? <button className="json-cell" title={JSON.stringify(JSON.parse(json))} onClick={() => setJsonCell({ row: rowIndex, column, value })}><Code size={13}/><span className="json-preview">{JSON.stringify(JSON.parse(json))}</span></button>
-              : <span className={isStatus ? `status-pill ${text.toLowerCase()}` : ''}>{formatCell(value)}</span>}
-            </td>
-          })}
-        </tr>)}</tbody>
-      </table>
-      {jsonCell && <JsonModal value={jsonCell.value} editable={editable && (rowMeta[jsonCell.row]?.canEdit ?? true)} onClose={() => setJsonCell(null)} onSave={onUpdate ? async value => { await onUpdate(jsonCell.column, jsonCell.row, value); setJsonCell(null) } : undefined}/>} 
-    </div>
+  const renderedStart = Math.max(0, windowStart - 1)
+  const renderedEnd = Math.min(totalPages, windowStart + visibleCount + 1)
+  const renderedCount = renderedEnd - renderedStart
+  const itemsOffset = Math.min(
+    virtualWidth - renderedCount * QUICK_PAGE_ITEM_WIDTH,
+    Math.max(0, scrollForStart(windowStart) - (windowStart - renderedStart) * QUICK_PAGE_ITEM_WIDTH),
   )
+  return <section className="quick-page-popover" role="dialog" aria-label="Go to page">
+    <header><div><b>Go to page</b><span>{totalPages.toLocaleString()} pages available</span></div><button className="icon-button" onClick={onClose} aria-label="Close page picker"><X size={14}/></button></header>
+    <form onSubmit={submit}>
+      <label htmlFor={inputID}>Page number</label>
+      <div className="quick-page-input"><input ref={inputRef} id={inputID} inputMode="numeric" autoComplete="off" autoCorrect="off" spellCheck={false} value={value} aria-invalid={Boolean(message)} onChange={event => { setValue(event.target.value); setMessage('') }}/><button className="primary" type="submit">Go</button></div>
+      {message && <p className="quick-page-error" role="alert">{message}</p>}
+    </form>
+    <div className="quick-page-heading"><span>Pages</span><small>Page 1 — {totalPages.toLocaleString()}</small></div>
+    <div
+      ref={scrollerRef}
+      className="quick-page-window"
+      style={{ width: viewportWidth }}
+      tabIndex={maxStart ? 0 : -1}
+      aria-label="Nearby pages"
+      onScroll={event => {
+        if (!maxScroll) return
+        setWindowStart(Math.min(maxStart, Math.max(0, Math.round(event.currentTarget.scrollLeft / maxScroll * maxStart))))
+      }}
+      onWheel={event => {
+        if (!maxStart) return
+        event.preventDefault()
+        const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
+        moveWindow(windowStart + Math.sign(delta) * Math.max(1, Math.round(Math.abs(delta) / 40)))
+      }}
+      onKeyDown={event => {
+        const direction = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
+        if (!maxStart || !direction) return
+        event.preventDefault()
+        moveWindow(windowStart + direction)
+      }}
+    >
+      <div className="quick-page-track" style={{ width: virtualWidth }}><div className="quick-page-items" style={{ transform: `translateX(${itemsOffset}px)` }}>{Array.from({ length: renderedCount }, (_, index) => {
+        const page = renderedStart + index + 1
+        return <span className="quick-page-cell" key={page}><button type="button" title={`Page ${page.toLocaleString()}`} className={page === currentPage ? 'active' : ''} aria-current={page === currentPage ? 'page' : undefined} onClick={() => onSelect(page)}>{page.toLocaleString()}</button></span>
+      })}</div></div>
+    </div>
+  </section>
 }
 
 type SavedConnectionsProps = {
@@ -291,10 +237,12 @@ const FONT_OPTIONS: { value: AppearancePreferences['fontFamily']; label: string;
   { value: 'mono', label: 'Monospace', description: 'Technical and precise' },
 ]
 
-function AppearanceModal({ appearance, ready, onChange, onClose }: {
+function AppearanceModal({ appearance, transfer, ready, onChange, onTransferChange, onClose }: {
   appearance: AppearancePreferences
+  transfer: TransferPreferences
   ready: boolean
   onChange: (next: AppearancePreferences) => void
+  onTransferChange: (next: TransferPreferences) => void
   onClose: () => void
 }) {
   useEffect(() => {
@@ -308,7 +256,7 @@ function AppearanceModal({ appearance, ready, onChange, onClose }: {
     <section className="appearance-modal" role="dialog" aria-modal="true" aria-labelledby="appearance-title">
       <header>
         <div className="modal-mark"><Settings size={18}/></div>
-        <div><h3 id="appearance-title">Appearance</h3><p>Make QueryNest more comfortable to read.</p></div>
+        <div><h3 id="appearance-title">Settings</h3><p>Appearance and data operation preferences.</p></div>
         <button className="icon-button" onClick={onClose} aria-label="Close appearance settings"><X size={16}/></button>
       </header>
       <div className="appearance-content">
@@ -320,6 +268,11 @@ function AppearanceModal({ appearance, ready, onChange, onClose }: {
             <button onClick={() => changeSize(appearance.fontSize + 1)} disabled={!ready || appearance.fontSize >= 20} aria-label="Increase font size">A+</button>
           </div>
           <div className="range-labels" aria-hidden="true"><span>Compact</span><span>Large</span></div>
+        </section>
+        <section className="appearance-section">
+          <div className="setting-heading"><div><b>Backup batch size</b><small>Flushes streamed backup data and writes a recovery checkpoint at this interval.</small></div><output>{transfer.backupBatchSizeMB.toLocaleString()} MB</output></div>
+          <label className="batch-size-control"><input type="number" min="1" max="10240" step="1" value={transfer.backupBatchSizeMB} disabled={!ready} onChange={event => onTransferChange({ backupBatchSizeMB: Number(event.target.value) || 1 })}/><span>MB</span></label>
+          <div className="batch-size-hint">The default is 500 MB. Data is streamed continuously and is not buffered to this size in memory.</div>
         </section>
         <section className="appearance-section">
           <div className="setting-heading"><div><b>Global font family</b><small>Choose the typeface used by the interface.</small></div></div>
@@ -542,13 +495,15 @@ export default function App() {
         {sessions.length > 1 && <div className="resizable-database-rail" style={{ width: databaseSidebar.width, flexBasis: databaseSidebar.width }}><nav className="database-rail" aria-label="Open databases">{sessions.map(session => <button key={session.id} className={`database-rail-tab ${activeID === session.id ? 'active' : ''} ${session.connectionState ?? ''}`} aria-label={`Switch to ${session.database} (${session.name})`} aria-pressed={activeID === session.id} title={`${session.database} — ${session.name}\n${session.path}`} disabled={busy} onClick={() => { if (session.id !== activeID) beforeLeave(() => setActiveID(session.id)) }}>{session.connectionState === 'connecting' ? <Refresh size={20} className="spin"/> : session.connectionState === 'failed' ? <Alert size={20}/> : <Database size={20}/>}<span>{session.database}</span></button>)}</nav><SidebarResizeHandle label="Resize database sidebar" sizing={databaseSidebar}/></div>}
         <div className="database-panels" inert={busy || connectionOpen || Boolean(editingConnection) || Boolean(failedConnection)}>{sessions.map(session => session.connectionState
           ? <ConnectionSkeleton key={session.id} session={session} active={session.id === activeID} tableSidebar={tableSidebar}/>
-          : <DatabaseWorkspace key={session.id} status={session} active={session.id === activeID} blocked={busy || connectionOpen || Boolean(editingConnection) || Boolean(failedConnection)} tableSidebar={tableSidebar} workspaceRef={workspaceRef(session.id)} onNewConnection={newConnection} onCloseSession={() => closeSession(session.id)} onOpenDatabase={database => openDatabase(session.id, database)}/>)}</div>
+          : <DatabaseWorkspace key={session.id} status={session} active={session.id === activeID} blocked={busy || connectionOpen || Boolean(editingConnection) || Boolean(failedConnection)} tableSidebar={tableSidebar} transferPreferences={sidebarPreferences.transfer} workspaceRef={workspaceRef(session.id)} onNewConnection={newConnection} onCloseSession={() => closeSession(session.id)} onOpenDatabase={database => openDatabase(session.id, database)}/>)}</div>
       </div>}
     {error && <Toast message={error} onClose={() => setError('')}/>}
     {connectionOpen && <ConnectionModal config={connectionConfig} setConfig={setConnectionConfig} saved={savedConnections} busy={busy} onEdit={editSaved} onRemove={removeSaved} onSQLite={connectFile} onPostgres={config => connect(() => api().OpenPostgresSession(config))} onSaved={openSaved} onError={setError} onClose={() => setConnectionOpen(false)}/>}
     {editingConnection && <SavedConnectionEditModal profile={editingConnection} busy={busy} onSave={saveEditedConnection} onClose={() => setEditingConnection(null)}/>}
     {failedConnection && <ConnectionFailureModal session={failedConnection} onEdit={editFailedConnection} onClose={closeFailedConnection}/>}
-    {appearanceOpen && <AppearanceModal appearance={sidebarPreferences.appearance} ready={sidebarPreferences.ready} onChange={sidebarPreferences.setAppearance} onClose={() => setAppearanceOpen(false)}/>}
+    {appearanceOpen && (
+      <AppearanceModal appearance={sidebarPreferences.appearance} transfer={sidebarPreferences.transfer} ready={sidebarPreferences.ready} onChange={sidebarPreferences.setAppearance} onTransferChange={sidebarPreferences.setTransfer} onClose={() => setAppearanceOpen(false)}/>
+    )}
   </div>
 }
 
@@ -576,11 +531,12 @@ function ConnectionSkeleton({ session, active, tableSidebar }: { session: Worksp
   </div>
 }
 
-function DatabaseWorkspace({ status, active, blocked, tableSidebar, workspaceRef, onNewConnection, onCloseSession, onOpenDatabase }: {
+function DatabaseWorkspace({ status, active, blocked, tableSidebar, transferPreferences, workspaceRef, onNewConnection, onCloseSession, onOpenDatabase }: {
   status: ConnectionStatus
   active: boolean
   blocked: boolean
   tableSidebar: SidebarSizing
+  transferPreferences: TransferPreferences
   workspaceRef: React.Ref<WorkspaceHandle>
   onNewConnection: () => void
   onCloseSession: () => Promise<void>
@@ -593,6 +549,12 @@ function DatabaseWorkspace({ status, active, blocked, tableSidebar, workspaceRef
   const [pinnedTabs, setPinnedTabs] = useState<Set<string>>(new Set())
   const [tabStates, setTabStates] = useState<Record<string, TableTabState>>({})
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set())
+  const selectionAnchorRef = useRef('')
+  const [transferDialog, setTransferDialog] = useState<{ preview: TransferPreview; tables: TableRef[]; format: 'csv' | 'json'; conflict: 'abort' | 'skip' } | null>(null)
+  const [transferBusy, setTransferBusy] = useState(false)
+  const [operationNotice, setOperationNotice] = useState('')
+  const [confirmAction, setConfirmAction] = useState<{ title: string; message: string; run: () => Promise<void> } | null>(null)
   const closeContextMenu = useCallback(() => setContextMenu(null), [])
   const [sidebarFilter, setSidebarFilter] = useState('')
   const [loadingTables, setLoadingTables] = useState(true)
@@ -751,6 +713,121 @@ function DatabaseWorkspace({ status, active, blocked, tableSidebar, workspaceRef
     const x = event.clientX || bounds.left + 24
     const y = event.clientY || bounds.top + Math.min(bounds.height, 24)
     setContextMenu({ kind, key, x, y })
+  }
+
+  function refsForKeys(keys: Iterable<string>) {
+    const selected = new Set(keys)
+    return tables.filter(item => item.type === 'table' && selected.has(tableKey(item))).map(item => ({ schema: item.schema, name: item.name }))
+  }
+
+  function selectTable(event: React.MouseEvent<HTMLButtonElement>, item: TableSummary) {
+    const key = tableKey(item)
+    if (item.type === 'table' && event.shiftKey && selectionAnchorRef.current) {
+      const start = tableItems.findIndex(value => tableKey(value) === selectionAnchorRef.current)
+      const end = tableItems.findIndex(value => tableKey(value) === key)
+      if (start >= 0 && end >= 0) {
+        const [from, to] = start < end ? [start, end] : [end, start]
+        setSelectedTables(new Set(tableItems.slice(from, to + 1).map(tableKey)))
+        return
+      }
+    }
+    if (item.type === 'table' && (event.ctrlKey || event.metaKey)) {
+      setSelectedTables(current => {
+        const next = new Set(current)
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        return next
+      })
+      selectionAnchorRef.current = key
+      return
+    }
+    setSelectedTables(item.type === 'table' ? new Set([key]) : new Set())
+    selectionAnchorRef.current = item.type === 'table' ? key : ''
+    openTable(item)
+  }
+
+  function showTableContextMenu(event: React.MouseEvent<HTMLButtonElement>, item: TableSummary) {
+    const key = tableKey(item)
+    if (item.type === 'table' && !selectedTables.has(key)) {
+      setSelectedTables(new Set([key]))
+      selectionAnchorRef.current = key
+    }
+    showContextMenu(event, 'table', key)
+  }
+
+  async function openTransferPreview(load: () => Promise<TransferPreview>, tables: TableRef[], format: 'csv' | 'json' = 'json') {
+    setTransferBusy(true); setError('')
+    try {
+      const preview = await load()
+      if (preview.kind === 'restore' && preview.driver !== status.driver) throw new Error(`This ${preview.driver} backup cannot be restored into ${status.driver}.`)
+      if (preview.kind) setTransferDialog({ preview, tables, format, conflict: 'abort' })
+    } catch (e) { setError(String(e)) }
+    finally { setTransferBusy(false) }
+  }
+
+  function startBackup() {
+    void openTransferPreview(() => db.PreviewDatabaseBackup(), [])
+  }
+
+  function startRestore() {
+    if (status.readOnly) return
+    guardWorkspace('Restore this database?', 'Restoring replaces data in the archived tables. Save or discard local drafts first.', () => {
+      void openTransferPreview(() => db.ChooseRestoreBackup(), [])
+    })
+  }
+
+  function startExport(refs: TableRef[]) {
+    void openTransferPreview(() => db.PreviewTableExport(refs), refs, refs.length === 1 ? 'csv' : 'json')
+  }
+
+  function startImport(ref: TableRef) {
+    if (status.readOnly) return
+    const key = `${ref.schema}\u0000${ref.name}`
+    guardUnsaved(key, 'Import into this table?', 'Importing changes database rows and requires resolving local drafts first.', () => {
+      void openTransferPreview(() => db.ChooseTableImport(ref), [ref])
+    })
+  }
+
+  function invalidateTransferredTables(refs?: TableRef[]) {
+    const keys = refs?.length ? new Set(refs.map(ref => `${ref.schema}\u0000${ref.name}`)) : null
+    setTabStates(current => Object.fromEntries(Object.entries(current).map(([key, state]) => [key, !keys || keys.has(key) ? { ...state, loadedRequest: '', schemaLoaded: false, indexesLoaded: false, selectedRows: new Set() } : state])))
+    void loadTables().catch(e => setError(String(e)))
+  }
+
+  async function runTransfer() {
+    if (!transferDialog || transferBusy) return
+    const { preview, tables, format, conflict } = transferDialog
+    setTransferBusy(true); setError('')
+    try {
+      let result: TransferResult
+      if (preview.kind === 'backup') result = await db.BackupDatabase(transferPreferences.backupBatchSizeMB)
+      else if (preview.kind === 'restore') result = await db.RestoreDatabase(preview.path)
+      else if (preview.kind === 'export') result = await db.ExportTables(tables, format)
+      else result = await db.ImportTable(tables[0], preview.path, conflict)
+      if (!result.path && (preview.kind === 'backup' || preview.kind === 'export')) return
+      setTransferDialog(null)
+      const skipped = result.skipped ? ` · ${result.skipped.toLocaleString()} skipped` : ''
+      setOperationNotice(`${preview.kind === 'backup' ? 'Backup' : preview.kind === 'restore' ? 'Restore' : preview.kind === 'export' ? 'Export' : 'Import'} complete · ${result.rows.toLocaleString()} rows${skipped}`)
+      if (preview.kind === 'restore') invalidateTransferredTables()
+      if (preview.kind === 'import') invalidateTransferredTables(tables)
+    } catch (e) { setError(String(e)) }
+    finally { setTransferBusy(false) }
+  }
+
+  function confirmTruncate(refs: TableRef[]) {
+    guardWorkspace('Truncate selected tables?', 'Truncate permanently removes every row from the selected tables.', () => setConfirmAction({
+      title: `Truncate ${refs.length} table${refs.length === 1 ? '' : 's'}?`,
+      message: 'This operation cannot be undone. All rows in the selected tables will be removed in one transaction.',
+      run: async () => {
+        setTransferBusy(true)
+        try {
+          const affected = await db.TruncateTables(refs)
+          setConfirmAction(null); invalidateTransferredTables(refs)
+          setOperationNotice(`Truncate complete · ${affected.toLocaleString()} ${status.driver === 'SQLite' ? 'rows' : 'tables'} affected`)
+        } catch (e) { setError(String(e)) }
+        finally { setTransferBusy(false) }
+      },
+    }))
   }
 
   function refreshFromMenu(item: TableSummary) {
@@ -979,27 +1056,37 @@ function DatabaseWorkspace({ status, active, blocked, tableSidebar, workspaceRef
   const viewItems = filteredTables.filter(item => item.type === 'view')
   const guardedKeys = guardedAction ? guardedAction.tables ?? [guardedAction.table] : []
   const menuTable = contextMenu?.kind === 'table' ? tables.find(item => tableKey(item) === contextMenu.key) : undefined
+  const menuTableKeys = contextMenu?.kind === 'table' ? selectedTables.has(contextMenu.key) ? selectedTables : new Set([contextMenu.key]) : new Set<string>()
+  const menuTableRefs = refsForKeys(menuTableKeys)
+  const singleMenuObject = menuTableRefs.length === 1 || menuTable?.type === 'view'
   const menuActions: ContextMenuAction[] = contextMenu?.kind === 'tab' ? [
     { label: 'Close tab', icon: <X size={15}/>, run: () => closeTab(contextMenu.key) },
     { label: pinnedTabs.has(contextMenu.key) ? 'Unpin tab' : 'Pin tab', icon: <Pin size={15}/>, run: () => togglePin(contextMenu.key) },
     { label: 'Close all tabs', icon: <X size={15}/>, separator: true, danger: true, run: closeAllTabs },
+  ] : contextMenu?.kind === 'database' ? [
+    { label: 'Back up database', icon: <Save size={15}/>, run: startBackup },
+    ...(!status.readOnly ? [{ label: 'Restore database', icon: <Refresh size={15}/>, run: startRestore, separator: true, danger: true }] : []),
   ] : menuTable ? [
-    { label: 'Open data', icon: <Table size={15}/>, run: () => openTable(menuTable, 'data') },
-    { label: 'View structure', icon: <Columns size={15}/>, run: () => openTable(menuTable, 'structure') },
-    { label: 'Refresh table', icon: <Refresh size={15}/>, separator: true, run: () => refreshFromMenu(menuTable) },
-    { label: 'Copy qualified name', icon: <Copy size={15}/>, run: () => copyQualifiedName(menuTable) },
+    ...(singleMenuObject ? [
+      { label: 'Open data', icon: <Table size={15}/>, run: () => openTable(menuTable, 'data') },
+      { label: 'View structure', icon: <Columns size={15}/>, run: () => openTable(menuTable, 'structure') },
+    ] : []),
+    ...(menuTableRefs.length ? [{ label: `Export ${menuTableRefs.length === 1 ? 'table' : `${menuTableRefs.length} tables`}`, icon: <File size={15}/>, run: () => startExport(menuTableRefs), separator: true }] : []),
+    ...(!status.readOnly && menuTableRefs.length === 1 ? [{ label: 'Import into table', icon: <Plus size={15}/>, run: () => startImport(menuTableRefs[0]) }] : []),
+    ...(singleMenuObject ? [{ label: 'Refresh table', icon: <Refresh size={15}/>, run: () => refreshFromMenu(menuTable) }, { label: 'Copy qualified name', icon: <Copy size={15}/>, run: () => copyQualifiedName(menuTable) }] : []),
+    ...(!status.readOnly && menuTableRefs.length ? [{ label: `Truncate ${menuTableRefs.length === 1 ? 'table' : `${menuTableRefs.length} tables`}`, icon: <Trash size={15}/>, run: () => confirmTruncate(menuTableRefs), separator: true, danger: true }] : []),
   ] : []
   return <div className="database-workspace" hidden={!active}>
     <div className="workspace">
       {sidebarOpen && <aside className="sidebar" style={{ width: tableSidebar.width, flexBasis: tableSidebar.width }}>
-        <div className="brand"><div className="brand-mark"><Database size={18}/></div><span>QueryNest</span><button className="icon-button"><More size={17}/></button></div>
-        <button className="connection-card" title={status.path} onClick={onNewConnection}>
+        <div className="brand"><div className="brand-mark"><Database size={18}/></div><span>QueryNest</span><button className="icon-button" aria-label="Database actions" onClick={event => showContextMenu(event, 'database', '')}><More size={17}/></button></div>
+        <button className="connection-card" title={`${status.path}\nRight-click for backup and restore`} onClick={onNewConnection} onContextMenu={event => showContextMenu(event, 'database', '')}>
           <span className={`db-avatar ${status.driver === 'PostgreSQL' ? 'postgres' : ''}`}>{status.driver === 'PostgreSQL' ? 'PG' : 'SQ'}</span><span className="connection-text"><b>{status.name}</b><small><i className="online-dot"/> {status.driver} · {status.readOnly ? 'Read-only' : 'Editable'}</small></span><ChevronDown size={15}/>
         </button>
         <div className="side-search"><Search size={14}/><input ref={sidebarSearchRef} aria-label="Filter database objects" value={sidebarFilter} onChange={e => setSidebarFilter(e.target.value)} placeholder="Filter objects"/><span className="search-shortcut" aria-hidden="true"><kbd><Command size={12}/></kbd><kbd>K</kbd></span></div>
         <div className="object-tree">{loadingTables ? <SidebarSkeleton/> : <>
-          <ObjectGroup label="Tables" count={tableItems.length}>{tableItems.map(item => <ObjectRow key={tableKey(item)} item={item} countLoading={countingTables.has(tableKey(item))} active={activeTable === tableKey(item)} onClick={() => openTable(item)} onContextMenu={event => showContextMenu(event, 'table', tableKey(item))}/>)}</ObjectGroup>
-          <ObjectGroup label="Views" count={viewItems.length}>{viewItems.map(item => <ObjectRow key={tableKey(item)} item={item} countLoading={countingTables.has(tableKey(item))} active={activeTable === tableKey(item)} onClick={() => openTable(item)} onContextMenu={event => showContextMenu(event, 'table', tableKey(item))}/>)}</ObjectGroup>
+          <ObjectGroup label="Tables" count={tableItems.length}>{tableItems.map(item => <ObjectRow key={tableKey(item)} item={item} countLoading={countingTables.has(tableKey(item))} active={activeTable === tableKey(item)} selected={selectedTables.has(tableKey(item))} onClick={event => selectTable(event, item)} onContextMenu={event => showTableContextMenu(event, item)}/>)}</ObjectGroup>
+          <ObjectGroup label="Views" count={viewItems.length}>{viewItems.map(item => <ObjectRow key={tableKey(item)} item={item} countLoading={countingTables.has(tableKey(item))} active={activeTable === tableKey(item)} selected={false} onClick={event => selectTable(event, item)} onContextMenu={event => showTableContextMenu(event, item)}/>)}</ObjectGroup>
         </>}</div>
         <div className="sidebar-footer"><DatabasePicker status={status} onSelect={onOpenDatabase}/><button onClick={() => refresh()} className="icon-button database-refresh" title="Refresh database" aria-label="Refresh database" disabled={loadingTables}><Refresh size={15} className={loadingTables ? 'spin' : ''}/></button><button onClick={disconnect} className="icon-button" title="Close database" aria-label="Close database"><X size={15}/></button></div>
         <SidebarResizeHandle label="Resize table sidebar" sizing={tableSidebar}/>
@@ -1018,7 +1105,9 @@ function DatabaseWorkspace({ status, active, blocked, tableSidebar, workspaceRef
           const history = draftsByTable[tab] ?? { past: [], present: [], future: [] }
           const operations = history.present
           const draftGrid = buildDraftGrid(state.data, state.schema, operations, state.page)
-          const totalPages = Math.max(1, Math.ceil(state.data.total / PAGE_SIZE))
+          const actualTotalPages = Math.max(1, Math.ceil(state.data.total / PAGE_SIZE))
+          const pagingLimited = actualTotalPages > MAX_NAVIGABLE_PAGES
+          const totalPages = Math.min(MAX_NAVIGABLE_PAGES, actualTotalPages)
           return <Activity key={tab} name={`${status.id}:${item.schema}.${item.name}`} mode={activeTable === tab ? 'visible' : 'hidden'}>
             <div key={tab} className="table-activity">
               <header className="content-header">
@@ -1039,7 +1128,7 @@ function DatabaseWorkspace({ status, active, blocked, tableSidebar, workspaceRef
                   : <SchemaView schema={state.schema} indexes={state.indexes} error={state.structureError}/>}
                 {(state.loading || loadingTables) && <div className="loading-bar"/>}
               </div>
-              {!queryOpen && <footer className="pagination"><span>{state.data.total ? `${state.page * PAGE_SIZE + 1}–${Math.min((state.page + 1) * PAGE_SIZE, state.data.total)} of ${state.data.total.toLocaleString()} rows` : '0 rows'}</span><span className="query-time"><Clock size={13}/>{state.data.durationMs} ms</span>{!status.readOnly && state.schema.some(column => column.primaryKey) && <span className="edit-hint">Double-click a cell to edit</span>}<div className="page-controls"><button disabled={state.page === 0} onClick={() => changePage(tab, state.page - 1)}><ChevronRight size={14} className="flip"/></button><span>Page {state.page + 1} of {totalPages}</span><button disabled={state.page + 1 >= totalPages} onClick={() => changePage(tab, state.page + 1)}><ChevronRight size={14}/></button></div></footer>}
+              {!queryOpen && <footer className="pagination"><span>{state.data.total ? `${state.page * PAGE_SIZE + 1}–${Math.min((state.page + 1) * PAGE_SIZE, state.data.total)} of ${state.data.total.toLocaleString()} rows` : '0 rows'}</span><span className="query-time"><Clock size={13}/>{state.data.durationMs} ms</span>{!status.readOnly && state.schema.some(column => column.primaryKey) && <span className="edit-hint">Double-click a cell to edit</span>}<div className="page-controls">{pagingLimited ? <div className="paging-limit-warning" role="status"><Alert size={14}/><span><b>Page limit reached</b><small>Paging supports up to {MAX_NAVIGABLE_PAGES.toLocaleString()} pages</small></span></div> : <><button aria-label="Previous page" disabled={state.page === 0} onClick={() => changePage(tab, state.page - 1)}><ChevronRight size={14} className="flip"/></button><QuickPagePicker currentPage={state.page + 1} totalPages={totalPages} onSelect={page => changePage(tab, page - 1)}/><button aria-label="Next page" disabled={state.page + 1 >= totalPages} onClick={() => changePage(tab, state.page + 1)}><ChevronRight size={14}/></button></>}</div></footer>}
               {queryOpen && <QueryPanel
                 query={query}
                 setQuery={setQuery}
@@ -1056,9 +1145,20 @@ function DatabaseWorkspace({ status, active, blocked, tableSidebar, workspaceRef
     </div>
     {error && <Toast message={error} onClose={() => setError('')}/>}
 
-    {contextMenu && menuActions.length > 0 && <ContextMenu x={contextMenu.x} y={contextMenu.y} label={contextMenu.kind === 'tab' ? 'Tab actions' : 'Table actions'} actions={menuActions} onClose={closeContextMenu}/>}
+    {contextMenu && menuActions.length > 0 && <ContextMenu x={contextMenu.x} y={contextMenu.y} label={contextMenu.kind === 'tab' ? 'Tab actions' : contextMenu.kind === 'database' ? 'Database actions' : 'Table actions'} actions={menuActions} onClose={closeContextMenu}/>}
 
-    {guardedAction && <UnsavedModal title={guardedAction.title} message={guardedAction.message} count={guardedKeys.reduce((count, key) => count + (draftsByTable[key]?.present.length ?? 0), 0)} onCancel={() => setGuardedAction(null)} onDiscard={async () => { const action = guardedAction; guardedKeys.forEach(discardChanges); setGuardedAction(null); await action.run() }} onSave={async () => { const action = guardedAction; try { for (const key of guardedKeys) await saveChanges(key); setGuardedAction(null); await action.run() } catch { /* Keep dialog open when save fails. */ } }}/>}
+    {guardedAction && (
+      <UnsavedModal title={guardedAction.title} message={guardedAction.message} count={guardedKeys.reduce((count, key) => count + (draftsByTable[key]?.present.length ?? 0), 0)} onCancel={() => setGuardedAction(null)} onDiscard={async () => { const action = guardedAction; guardedKeys.forEach(discardChanges); setGuardedAction(null); await action.run() }} onSave={async () => { const action = guardedAction; try { for (const key of guardedKeys) await saveChanges(key); setGuardedAction(null); await action.run() } catch { /* Keep dialog open when save fails. */ } }}/>
+    )}
+    {transferDialog && (
+      <TransferModal state={transferDialog} busy={transferBusy} onChange={setTransferDialog} onClose={() => setTransferDialog(null)} onRun={() => void runTransfer()}/>
+    )}
+    {confirmAction && (
+      <DangerConfirmModal title={confirmAction.title} message={confirmAction.message} busy={transferBusy} onClose={() => setConfirmAction(null)} onConfirm={() => void confirmAction.run()}/>
+    )}
+    {operationNotice && (
+      <OperationToast message={operationNotice} onClose={() => setOperationNotice('')}/>
+    )}
   </div>
 }
 
@@ -1067,8 +1167,8 @@ function ObjectGroup({ label, count, children }: { label: string; count: number;
   return <div className={`object-group ${open ? 'open' : ''}`}><button className="group-title" onClick={() => setOpen(value => !value)} aria-expanded={open}>{open ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}<span>{label}</span><em>{count}</em></button>{open && <div className="object-children">{children}</div>}</div>
 }
 
-function ObjectRow({ item, active, countLoading, onClick, onContextMenu }: { item: TableSummary; active: boolean; countLoading: boolean; onClick: () => void; onContextMenu: (event: React.MouseEvent<HTMLButtonElement>) => void }) {
-  return <button title={`${item.schema}.${item.name}`} className={`object-row ${active ? 'active' : ''}`} onClick={onClick} onContextMenu={onContextMenu}>{item.type === 'view' ? <Eye size={14}/> : <Table size={14}/>}<span>{item.name}</span><small>{countLoading ? <i className="row-count-skeleton" aria-label="Loading row count"/> : item.rows >= 0 ? item.rows.toLocaleString() : '—'}</small></button>
+function ObjectRow({ item, active, selected, countLoading, onClick, onContextMenu }: { item: TableSummary; active: boolean; selected: boolean; countLoading: boolean; onClick: (event: React.MouseEvent<HTMLButtonElement>) => void; onContextMenu: (event: React.MouseEvent<HTMLButtonElement>) => void }) {
+  return <button title={`${item.schema}.${item.name}`} aria-selected={selected} className={`object-row ${active ? 'active' : ''} ${selected ? 'selected' : ''}`} onClick={onClick} onContextMenu={onContextMenu}>{item.type === 'view' ? <Eye size={14}/> : <Table size={14}/>}<span>{item.name}</span><small>{countLoading ? <i className="row-count-skeleton" aria-label="Loading row count"/> : item.rows >= 0 ? item.rows.toLocaleString() : '—'}</small></button>
 }
 
 function ContextMenu({ x, y, label, actions, onClose }: { x: number; y: number; label: string; actions: ContextMenuAction[]; onClose: () => void }) {
@@ -1158,30 +1258,53 @@ function QueryPanel({ query, setQuery, result, running, onRun, onClose }: { quer
   </section>
 }
 
-function JsonModal({ value, editable, onClose, onSave }: { value: unknown; editable: boolean; onClose: () => void; onSave?: (value: string) => Promise<void> }) {
-  const [text, setText] = useState(jsonText(value) ?? '')
-  const [editing, setEditing] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [invalid, setInvalid] = useState('')
+function TransferModal({ state, busy, onChange, onClose, onRun }: {
+  state: { preview: TransferPreview; tables: TableRef[]; format: 'csv' | 'json'; conflict: 'abort' | 'skip' }
+  busy: boolean
+  onChange: (next: { preview: TransferPreview; tables: TableRef[]; format: 'csv' | 'json'; conflict: 'abort' | 'skip' }) => void
+  onClose: () => void
+  onRun: () => void
+}) {
+  const { preview } = state
+  const first = preview.tables[0]
+  const incompatible = preview.kind === 'import' && Boolean(first?.extraColumns?.length || first?.requiredMissing?.length)
+  const title = preview.kind === 'backup' ? 'Back up database' : preview.kind === 'restore' ? 'Restore database' : preview.kind === 'export' ? `Export ${preview.tables.length === 1 ? 'table' : 'tables'}` : 'Import table'
+  const action = preview.kind === 'backup' ? 'Choose location & back up' : preview.kind === 'restore' ? 'Restore database' : preview.kind === 'export' ? 'Choose location & export' : 'Import data'
 
-  async function save() {
-    try {
-      const formatted = JSON.stringify(JSON.parse(text), null, 2)
-      setInvalid(''); setSaving(true)
-      await onSave?.(formatted)
-    } catch (error) {
-      if (error instanceof SyntaxError) setInvalid(error.message)
-    } finally { setSaving(false) }
-  }
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) onClose() }
+    window.addEventListener('keydown', close)
+    return () => window.removeEventListener('keydown', close)
+  }, [busy, onClose])
 
-  return <div className="modal-backdrop json-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
-    <section className="json-modal" role="dialog" aria-modal="true" aria-label="JSON viewer">
-      <header><div><span className="json-braces">{'{}'}</span><span><h3>JSON value</h3><p>{text.length.toLocaleString()} characters</p></span></div><div><button className="secondary" onClick={() => navigator.clipboard?.writeText(text)}><Columns size={14}/> Copy</button>{editable && <button className="secondary" onClick={() => setEditing(value => !value)}>{editing ? 'Preview' : 'Edit JSON'}</button>}<button className="icon-button" onClick={onClose}><X size={17}/></button></div></header>
-      <div className={`json-content ${editing ? 'editing' : ''}`}>{editing ? <textarea value={text} onChange={event => { setText(event.target.value); setInvalid('') }} spellCheck={false} autoFocus/> : <pre>{syntaxJSON(text)}</pre>}</div>
-      {invalid && <div className="json-error"><Alert size={14}/>{invalid}</div>}
-      <footer><span>{editing ? 'Changes are validated before saving' : 'Formatted JSON preview'}</span><div><button className="secondary" onClick={onClose}>Close</button>{editing && <button className="primary" disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save JSON'}</button>}</div></footer>
+  return <div className="modal-backdrop transfer-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !busy) onClose() }}>
+    <section className="transfer-modal" role="dialog" aria-modal="true" aria-labelledby="transfer-title">
+      <header><div className={`modal-mark ${preview.kind === 'restore' || preview.kind === 'import' ? 'warning' : ''}`}>{preview.kind === 'backup' ? <Save size={18}/> : preview.kind === 'restore' ? <Refresh size={18}/> : preview.kind === 'export' ? <File size={18}/> : <Plus size={18}/>}</div><div><h3 id="transfer-title">{title}</h3><p>{preview.database} · {preview.driver}</p></div><button className="icon-button" disabled={busy} onClick={onClose} aria-label="Close transfer preview"><X size={16}/></button></header>
+      <div className="transfer-content">
+        {preview.path && <div className="transfer-path"><File size={14}/><span title={preview.path}>{preview.path}</span></div>}
+        <div className="transfer-summary"><span><b>{preview.tables.length.toLocaleString()}</b> tables</span><span><b>{preview.tables.reduce((total, table) => total + table.rows, 0).toLocaleString()}</b> rows</span>{preview.format && <span><b>{preview.format.toUpperCase()}</b> format</span>}</div>
+        {preview.kind === 'backup' && <div className="transfer-note"><Alert size={14}/><span>Data streams into a <code>.pqnb</code> pending file with checkpoints. It becomes <code>.qnb</code> only after a complete, durable write.</span></div>}
+        {preview.kind === 'restore' && <div className="transfer-note danger"><Alert size={14}/><span>Rows in the archived tables will be replaced. This operation runs in one transaction and cannot be undone.</span></div>}
+        {preview.kind === 'export' && <section className="transfer-options"><b>Export format</b><div><button className={state.format === 'csv' ? 'active' : ''} disabled={preview.tables.length > 1} onClick={() => onChange({ ...state, format: 'csv' })}>CSV</button><button className={state.format === 'json' ? 'active' : ''} onClick={() => onChange({ ...state, format: 'json' })}>JSON</button></div>{preview.tables.length > 1 && <small>Multiple tables are exported as one JSON bundle.</small>}</section>}
+        {preview.kind === 'import' && <section className="transfer-options"><b>When a key conflicts</b><div><button className={state.conflict === 'abort' ? 'active' : ''} onClick={() => onChange({ ...state, conflict: 'abort' })}>Abort import</button><button className={state.conflict === 'skip' ? 'active' : ''} onClick={() => onChange({ ...state, conflict: 'skip' })}>Skip row</button></div></section>}
+        <section className="transfer-tables"><header><b>Column preview</b><span>{preview.tables.length > 100 ? `First 100 of ${preview.tables.length.toLocaleString()}` : `${preview.tables.length} table${preview.tables.length === 1 ? '' : 's'}`}</span></header>
+          {preview.tables.slice(0, 100).map(table => <div className="transfer-table" key={`${table.schema}.${table.name}`}><div><Table size={14}/><b>{table.schema}.{table.name}</b><span>{table.rows.toLocaleString()} rows</span></div><div className="transfer-columns">{table.columns.map(column => <code key={column} className={table.extraColumns?.includes(column) ? 'extra' : ''}>{column}</code>)}</div>{Boolean(table.missingColumns?.length) && <small className={table.requiredMissing?.length ? 'invalid' : ''}>Missing target columns: {table.missingColumns.join(', ')}</small>}</div>)}
+        </section>
+        {Boolean(first?.sampleRows?.length) && <div className="transfer-sample"><table><thead><tr>{first.columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{first.sampleRows.map((row, index) => <tr key={index}>{first.columns.map((column, columnIndex) => <td key={column}>{String(row[columnIndex] ?? 'NULL')}</td>)}</tr>)}</tbody></table></div>}
+        {incompatible && <div className="transfer-validation" role="alert"><Alert size={14}/><span>Fix the source columns before importing. Extra columns and missing required columns cannot be imported safely.</span></div>}
+      </div>
+      <footer><button className="secondary" disabled={busy} onClick={onClose}>Cancel</button><button className={`primary ${preview.kind === 'restore' ? 'danger-primary' : ''}`} disabled={busy || incompatible || !preview.tables.length} onClick={onRun}>{busy ? <Refresh size={14} className="spin"/> : null}{busy ? 'Working…' : action}</button></footer>
     </section>
   </div>
+}
+
+function DangerConfirmModal({ title, message, busy, onClose, onConfirm }: { title: string; message: string; busy: boolean; onClose: () => void; onConfirm: () => void }) {
+  return <div className="modal-backdrop transfer-backdrop"><section className="danger-confirm-modal" role="alertdialog" aria-modal="true"><div className="danger-confirm-icon"><Trash size={21}/></div><h3>{title}</h3><p>{message}</p><footer><button className="secondary" disabled={busy} onClick={onClose}>Cancel</button><button className="danger-button" disabled={busy} onClick={onConfirm}>{busy ? 'Working…' : 'Truncate'}</button></footer></section></div>
+}
+
+function OperationToast({ message, onClose }: { message: string; onClose: () => void }) {
+  useEffect(() => { const timer = window.setTimeout(onClose, 7000); return () => window.clearTimeout(timer) }, [message, onClose])
+  return <div className="operation-toast" role="status"><Check size={16}/><span>{message}</span><button onClick={onClose} aria-label="Dismiss notification"><X size={13}/></button></div>
 }
 
 function UnsavedModal({ title, message, count, onCancel, onDiscard, onSave }: { title: string; message: string; count: number; onCancel: () => void; onDiscard: () => Promise<void>; onSave: () => Promise<void> }) {
@@ -1209,19 +1332,6 @@ function ConnectionFailureModal({ session, onEdit, onClose }: { session: Workspa
       <footer><button className="secondary" onClick={onClose}>Close connection</button><button className="primary" onClick={onEdit}>{switchingDatabase ? <Refresh size={15}/> : <Settings size={15}/>} {switchingDatabase ? 'Try again' : 'Edit connection'}</button></footer>
     </section>
   </div>
-}
-
-function syntaxJSON(text: string) {
-  const parts = text.split(/("(?:\\.|[^"\\])*"\s*:|"(?:\\.|[^"\\])*"|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g)
-  return parts.map((part, index) => {
-    let type = ''
-    if (/^".*":$/.test(part)) type = 'json-key'
-    else if (/^"/.test(part)) type = 'json-string'
-    else if (/^(true|false)$/.test(part)) type = 'json-boolean'
-    else if (part === 'null') type = 'json-null'
-    else if (/^-?\d/.test(part)) type = 'json-number'
-    return type ? <span className={type} key={index}>{part}</span> : part
-  })
 }
 
 const SSL_MODE_OPTIONS: { value: PostgresConfig['sslMode']; label: string; description: string }[] = [

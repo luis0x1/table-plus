@@ -1,6 +1,6 @@
-- clean code.
+- /// clean code.
 
-- chuyển page nhanh:
+- /// chuyển page nhanh:
   + bấm vào sẽ mở model:
     - cho phép nhập đến page cụ thể
     - hiển thị doanh sách nằm ngang gồm 5 page gần page hiện tại nhất
@@ -19,3 +19,7 @@
   + script sql sẽ yêu cầu tạo file để thao tác, sẽ có worktree files theo connection, mỗi connection lưu lại sẽ sinh ra 1 hash, file sẽ lưu vào thư mục ~/QueryNet/<hash của project> với bảo default và <current folder>/projects/<hash của project> với portable 
   + chương trình sẽ phân tích script sql để vạch ra các scope, scope nào gần cursor nhất thì bôi màu nhẹ vào cho user biết là khi bấm run thì script đó sẽ chạy, nếu người dùng bôi đen nhiều script thì sẽ chạy nhiều, khi người dùng chọn bôi đen nhiều scope thì sẽ có 1 minimap bên phải trên hiển thị list script sẽ chạy(để dạng vắn tắt k hiển thị toàn bộ...).
   + thêm completion và hightlight syntax cho mã sql;
+
+- thêm filters, chọn column, đặt limit page
+
+- thêm hiển thị các lệnh sql đang được chạy, thêm tính năng hủy lệnh

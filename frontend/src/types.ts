@@ -15,6 +15,39 @@ export interface TableSummary {
   rows: number
 }
 
+export interface TableRef {
+  schema: string
+  name: string
+}
+
+export interface TransferTablePreview {
+  schema: string
+  name: string
+  columns: string[]
+  targetColumns: string[]
+  missingColumns: string[]
+  extraColumns: string[]
+  requiredMissing: string[]
+  sampleRows: unknown[][]
+  rows: number
+}
+
+export interface TransferPreview {
+  kind: 'backup' | 'restore' | 'export' | 'import'
+  path: string
+  format: string
+  driver: string
+  database: string
+  tables: TransferTablePreview[]
+}
+
+export interface TransferResult {
+  path: string
+  tables: number
+  rows: number
+  skipped: number
+}
+
 export interface PostgresConfig {
   id: string
   name: string
@@ -108,8 +141,13 @@ export interface AppearancePreferences {
   fontFamily: FontFamily
 }
 
+export interface TransferPreferences {
+  backupBatchSizeMB: number
+}
+
 export interface AppConfig {
   version: number
   sidebars: SidebarPreferences
   appearance: AppearancePreferences
+  transfer: TransferPreferences
 }

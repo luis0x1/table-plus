@@ -15,7 +15,7 @@ func TestAppConfigMigratesAndRestoresSidebarSizes(t *testing.T) {
 	app.configPath = filepath.Join(t.TempDir(), ".querynet", "config.json")
 	legacy := SidebarPreferences{Databases: 1.5, Tables: 2}
 	config, err := app.LoadAppConfig(legacy)
-	if err != nil || config.Sidebars != legacy || config.Appearance != (AppearancePreferences{FontSize: 17, FontFamily: "system"}) || config.Version != 1 {
+	if err != nil || config.Sidebars != legacy || config.Appearance != (AppearancePreferences{FontSize: 17, FontFamily: "system"}) || config.Transfer != (TransferPreferences{BackupBatchSizeMB: 500}) || config.Version != 1 {
 		t.Fatalf("migrate preferences: %#v, %v", config, err)
 	}
 	if runtime.GOOS != "windows" {
@@ -34,10 +34,14 @@ func TestAppConfigMigratesAndRestoresSidebarSizes(t *testing.T) {
 	if err := app.SaveAppearancePreferences(wantAppearance); err != nil {
 		t.Fatal(err)
 	}
+	wantTransfer := TransferPreferences{BackupBatchSizeMB: 256}
+	if err := app.SaveTransferPreferences(wantTransfer); err != nil {
+		t.Fatal(err)
+	}
 	reopened := NewApp()
 	reopened.configPath = app.configPath
 	config, err = reopened.LoadAppConfig(legacy)
-	if err != nil || config.Sidebars != want || config.Appearance != wantAppearance {
+	if err != nil || config.Sidebars != want || config.Appearance != wantAppearance || config.Transfer != wantTransfer {
 		t.Fatalf("file must override old browser preferences: %#v, %v", config, err)
 	}
 }
@@ -54,7 +58,7 @@ func TestAppConfigDefaultsAndPath(t *testing.T) {
 	}
 	app.configPath = filepath.Join(t.TempDir(), "config.json")
 	config, err := app.LoadAppConfig(SidebarPreferences{})
-	if err != nil || config.Sidebars != (SidebarPreferences{Databases: 1, Tables: 1}) || config.Appearance != (AppearancePreferences{FontSize: 17, FontFamily: "system"}) {
+	if err != nil || config.Sidebars != (SidebarPreferences{Databases: 1, Tables: 1}) || config.Appearance != (AppearancePreferences{FontSize: 17, FontFamily: "system"}) || config.Transfer != (TransferPreferences{BackupBatchSizeMB: 500}) {
 		t.Fatalf("incorrect defaults: %#v, %v", config, err)
 	}
 }
@@ -67,6 +71,7 @@ func TestAppConfigMigratesLegacyFileToSharedDataDirectory(t *testing.T) {
 		Version:    1,
 		Sidebars:   SidebarPreferences{Databases: 1.75, Tables: 1.25},
 		Appearance: AppearancePreferences{FontSize: 18, FontFamily: "mono"},
+		Transfer:   TransferPreferences{BackupBatchSizeMB: 500},
 	}
 	if err := writeAppConfig(app.legacyConfigPath, want, nil); err != nil {
 		t.Fatal(err)
@@ -120,7 +125,7 @@ func TestAppConfigRejectsInvalidSettingsWithoutOverwriting(t *testing.T) {
 	app := NewApp()
 	app.configPath = filepath.Join(t.TempDir(), "config.json")
 	valid := SidebarPreferences{Databases: 1, Tables: 1}
-	for _, content := range []string{`{`, `null`, `[]`, `{"version":2}`, `{"sidebars":{"tables":3}}`, `{"appearance":{"fontSize":30}}`, `{"appearance":{"fontFamily":"unknown"}}`} {
+	for _, content := range []string{`{`, `null`, `[]`, `{"version":2}`, `{"sidebars":{"tables":3}}`, `{"appearance":{"fontSize":30}}`, `{"appearance":{"fontFamily":"unknown"}}`, `{"transfer":{"backupBatchSizeMB":0}}`} {
 		if err := os.WriteFile(app.configPath, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}

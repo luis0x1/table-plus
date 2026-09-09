@@ -1,9 +1,10 @@
-import type { AppConfig, AppearancePreferences, SidebarPreferences, ColumnInfo, ConnectionStatus, IndexInfo, PostgresConfig, QueryResult, RowOperation, SavedConnection, SavedConnectionUpdate, TableData, TableSummary } from './types'
+import type { AppConfig, AppearancePreferences, SidebarPreferences, ColumnInfo, ConnectionStatus, IndexInfo, PostgresConfig, QueryResult, RowOperation, SavedConnection, SavedConnectionUpdate, TableData, TableRef, TableSummary, TransferPreferences, TransferPreview, TransferResult } from './types'
 
 type Backend = {
   LoadAppConfig(legacy: SidebarPreferences): Promise<AppConfig>
   SaveSidebarPreferences(preferences: SidebarPreferences): Promise<void>
   SaveAppearancePreferences(preferences: AppearancePreferences): Promise<void>
+  SaveTransferPreferences(preferences: TransferPreferences): Promise<void>
   ListDatabaseSessions(): Promise<ConnectionStatus[]>
   OpenPostgresSession(config: PostgresConfig): Promise<ConnectionStatus>
   OpenSavedSession(id: string, password: string): Promise<ConnectionStatus>
@@ -19,6 +20,15 @@ type Backend = {
   SessionGetTableData(id: string, schema: string, table: string, limit: number, offset: number, filter: string, sortColumn: string, sortDirection: string): Promise<TableData>
   SessionExecuteQuery(id: string, query: string): Promise<QueryResult>
   SessionApplyChanges(id: string, schema: string, table: string, operations: RowOperation[]): Promise<number>
+  SessionPreviewDatabaseBackup(id: string): Promise<TransferPreview>
+  SessionBackupDatabase(id: string, batchSizeMB: number): Promise<TransferResult>
+  SessionChooseRestoreBackup(id: string): Promise<TransferPreview>
+  SessionRestoreDatabase(id: string, path: string): Promise<TransferResult>
+  SessionPreviewTableExport(id: string, tables: TableRef[]): Promise<TransferPreview>
+  SessionExportTables(id: string, tables: TableRef[], format: string): Promise<TransferResult>
+  SessionChooseTableImport(id: string, table: TableRef): Promise<TransferPreview>
+  SessionImportTable(id: string, table: TableRef, path: string, conflict: string): Promise<TransferResult>
+  SessionTruncateTables(id: string, tables: TableRef[]): Promise<number>
   GetStatus(): Promise<ConnectionStatus>
   ChooseSQLiteFile(): Promise<ConnectionStatus>
   ConnectSQLite(path: string): Promise<ConnectionStatus>
@@ -65,11 +75,12 @@ const demoRows = [
 let mockConnected = false
 let mockSessions: ConnectionStatus[] = []
 const defaultAppearance: AppearancePreferences = { fontSize: 17, fontFamily: 'system' }
+const defaultTransfer: TransferPreferences = { backupBatchSizeMB: 500 }
 function mockAppConfig(legacy: SidebarPreferences): AppConfig {
   const stored = localStorage.getItem('querynest:preview-config')
-  if (!stored) return { version: 1, sidebars: legacy, appearance: defaultAppearance }
+  if (!stored) return { version: 1, sidebars: legacy, appearance: defaultAppearance, transfer: defaultTransfer }
   const parsed = JSON.parse(stored) as Partial<AppConfig>
-  return { version: 1, sidebars: parsed.sidebars ?? legacy, appearance: { ...defaultAppearance, ...parsed.appearance } }
+  return { version: 1, sidebars: parsed.sidebars ?? legacy, appearance: { ...defaultAppearance, ...parsed.appearance }, transfer: { ...defaultTransfer, ...parsed.transfer } }
 }
 function saveMockConfig(config: AppConfig) {
   localStorage.setItem('querynest:preview-config', JSON.stringify(config))
@@ -98,6 +109,9 @@ const mock: Backend = {
   async SaveAppearancePreferences(preferences) {
     saveMockConfig({ ...mockAppConfig({ databases: 1, tables: 1 }), appearance: preferences })
   },
+  async SaveTransferPreferences(preferences) {
+    saveMockConfig({ ...mockAppConfig({ databases: 1, tables: 1 }), transfer: preferences })
+  },
   async ListDatabaseSessions() { return [...mockSessions] },
   async OpenPostgresSession(config) { return addMockSession(await this.ConnectPostgres(config)) },
   async OpenSavedSession(id, password) { return addMockSession(await this.ConnectSavedConnection(id, password)) },
@@ -113,6 +127,15 @@ const mock: Backend = {
   async SessionGetTableData(id, ...args) { mockSession(id); return this.GetTableData(...args) },
   async SessionExecuteQuery(id, query) { mockSession(id); return this.ExecuteQuery(query) },
   async SessionApplyChanges(id, schema, table, operations) { mockSession(id); return this.ApplyChanges(schema, table, operations) },
+  async SessionPreviewDatabaseBackup(id) { const session = mockSession(id); const tables = await this.ListTables(); return { kind: 'backup', path: '', format: '', driver: session.driver, database: session.database, tables: await Promise.all(tables.filter(table => table.type === 'table').map(async table => { const data = await this.GetTableData(table.schema, table.name, 5, 0, '', '', ''); return { schema: table.schema, name: table.name, columns: data.columns, targetColumns: [], missingColumns: [], extraColumns: [], requiredMissing: [], sampleRows: data.rows, rows: data.total } })) } },
+  async SessionBackupDatabase() { return { path: 'preview.qnb', tables: 2, rows: 13, skipped: 0 } },
+  async SessionChooseRestoreBackup() { throw new Error('File selection is available in the desktop app.') },
+  async SessionRestoreDatabase() { return { path: 'preview.qnb', tables: 2, rows: 13, skipped: 0 } },
+  async SessionPreviewTableExport(id, tables) { const session = mockSession(id); return { kind: 'export', path: '', format: '', driver: session.driver, database: session.database, tables: await Promise.all(tables.map(async table => { const data = await this.GetTableData(table.schema, table.name, 5, 0, '', '', ''); return { schema: table.schema, name: table.name, columns: data.columns, targetColumns: [], missingColumns: [], extraColumns: [], requiredMissing: [], sampleRows: data.rows, rows: data.total } })) } },
+  async SessionExportTables(_id, tables) { return { path: 'preview.json', tables: tables.length, rows: 0, skipped: 0 } },
+  async SessionChooseTableImport() { throw new Error('File selection is available in the desktop app.') },
+  async SessionImportTable() { return { path: 'preview.csv', tables: 1, rows: 0, skipped: 0 } },
+  async SessionTruncateTables(_id, tables) { return tables.length },
   async GetStatus() { return { id: '', database: mockConnected ? 'querynest-demo' : '', connected: mockConnected, name: mockConnected ? 'querynest-demo' : '', path: mockConnected ? '~/querynest-demo.db' : '', driver: 'SQLite', readOnly: false } },
   async ChooseSQLiteFile() { mockConnected = true; return this.GetStatus() },
   async ConnectSQLite() { mockConnected = true; return this.GetStatus() },
@@ -169,6 +192,15 @@ export function databaseApi(id: string) {
     GetTableData: (schema: string, table: string, limit: number, offset: number, filter: string, sortColumn: string, sortDirection: string) => backend.SessionGetTableData(id, schema, table, limit, offset, filter, sortColumn, sortDirection),
     ExecuteQuery: (query: string) => backend.SessionExecuteQuery(id, query),
     ApplyChanges: (schema: string, table: string, operations: RowOperation[]) => backend.SessionApplyChanges(id, schema, table, operations),
+    PreviewDatabaseBackup: () => backend.SessionPreviewDatabaseBackup(id),
+    BackupDatabase: (batchSizeMB: number) => backend.SessionBackupDatabase(id, batchSizeMB),
+    ChooseRestoreBackup: () => backend.SessionChooseRestoreBackup(id),
+    RestoreDatabase: (path: string) => backend.SessionRestoreDatabase(id, path),
+    PreviewTableExport: (tables: TableRef[]) => backend.SessionPreviewTableExport(id, tables),
+    ExportTables: (tables: TableRef[], format: string) => backend.SessionExportTables(id, tables, format),
+    ChooseTableImport: (table: TableRef) => backend.SessionChooseTableImport(id, table),
+    ImportTable: (table: TableRef, path: string, conflict: string) => backend.SessionImportTable(id, table, path, conflict),
+    TruncateTables: (tables: TableRef[]) => backend.SessionTruncateTables(id, tables),
   }
 }
 

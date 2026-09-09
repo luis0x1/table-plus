@@ -20,10 +20,15 @@ type AppearancePreferences struct {
 	FontFamily string `json:"fontFamily"`
 }
 
+type TransferPreferences struct {
+	BackupBatchSizeMB int64 `json:"backupBatchSizeMB"`
+}
+
 type AppConfig struct {
 	Version    int                   `json:"version"`
 	Sidebars   SidebarPreferences    `json:"sidebars"`
 	Appearance AppearancePreferences `json:"appearance"`
+	Transfer   TransferPreferences   `json:"transfer"`
 }
 
 func defaultAppConfig() AppConfig {
@@ -31,6 +36,7 @@ func defaultAppConfig() AppConfig {
 		Version:    1,
 		Sidebars:   SidebarPreferences{Databases: 1, Tables: 1},
 		Appearance: AppearancePreferences{FontSize: 17, FontFamily: "system"},
+		Transfer:   TransferPreferences{BackupBatchSizeMB: 500},
 	}
 }
 
@@ -62,6 +68,10 @@ func validAppearancePreferences(p AppearancePreferences) bool {
 	default:
 		return false
 	}
+}
+
+func validTransferPreferences(p TransferPreferences) bool {
+	return p.BackupBatchSizeMB >= 1 && p.BackupBatchSizeMB <= 10240
 }
 
 // LoadAppConfig migrates the legacy file or browser preferences when the new
@@ -151,6 +161,24 @@ func (a *App) SaveAppearancePreferences(preferences AppearancePreferences) error
 	return writeAppConfig(path, config, fields)
 }
 
+func (a *App) SaveTransferPreferences(preferences TransferPreferences) error {
+	if !validTransferPreferences(preferences) {
+		return errors.New("backup batch size must be between 1 MB and 10 GB")
+	}
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	path, err := a.appConfigPath()
+	if err != nil {
+		return err
+	}
+	config, fields, err := readAppConfig(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	config.Version, config.Transfer = 1, preferences
+	return writeAppConfig(path, config, fields)
+}
+
 func readAppConfig(path string) (AppConfig, map[string]json.RawMessage, error) {
 	config := defaultAppConfig()
 	data, err := os.ReadFile(path)
@@ -172,6 +200,9 @@ func readAppConfig(path string) (AppConfig, map[string]json.RawMessage, error) {
 	}
 	if !validAppearancePreferences(config.Appearance) {
 		return config, nil, errors.New("read configuration: invalid appearance settings")
+	}
+	if !validTransferPreferences(config.Transfer) {
+		return config, nil, errors.New("read configuration: invalid data operation settings")
 	}
 	return config, fields, nil
 }
@@ -204,6 +235,17 @@ func writeAppConfig(path string, config AppConfig, fields map[string]json.RawMes
 	appearance["fontSize"], _ = json.Marshal(config.Appearance.FontSize)
 	appearance["fontFamily"], _ = json.Marshal(config.Appearance.FontFamily)
 	fields["appearance"], _ = json.Marshal(appearance)
+	transfer := make(map[string]json.RawMessage)
+	if raw := fields["transfer"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &transfer); err != nil {
+			return fmt.Errorf("read transfer configuration: %w", err)
+		}
+		if transfer == nil {
+			transfer = make(map[string]json.RawMessage)
+		}
+	}
+	transfer["backupBatchSizeMB"], _ = json.Marshal(config.Transfer.BackupBatchSizeMB)
+	fields["transfer"], _ = json.Marshal(transfer)
 	fields["version"], _ = json.Marshal(config.Version)
 	data, err := json.MarshalIndent(fields, "", "  ")
 	if err != nil {
