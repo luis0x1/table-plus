@@ -582,6 +582,9 @@ button:not(:disabled):active { transform: scale(.97); transition-duration: 70ms;
 ::-webkit-scrollbar-track { background: #101318; }
 ::-webkit-scrollbar-thumb { background: #2a3038; border: 2px solid #101318; border-radius: 8px; }
 ::-webkit-scrollbar-thumb:hover { background: #3a424d; }
+/* Where two scrollbars meet, WebKit paints an unstyled corner. */
+::-webkit-scrollbar-corner { background: #101318; }
+::-webkit-scrollbar-button { display: none; }
 
 @media (max-width: 1100px) {
   .sidebar { width: 214px; flex-basis: 214px; }
