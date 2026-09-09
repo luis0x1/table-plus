@@ -607,6 +607,7 @@ button:not(:disabled):active { transform: scale(.97); transition-duration: 70ms;
 .database-panels { flex: 1; min-width: 0; min-height: 0; }
 .database-workspace { height: 100%; }
 .database-workspace[hidden] { display: none; }
+.table-activity[hidden] { display: none; }
 .database-workspace .workspace { height: 100%; }
 .connection-skeleton .sidebar, .connection-skeleton .main-panel { animation: none; }
 .skeleton-connection-card { cursor: default; }

@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
-import type { PointerEvent as ReactPointerEvent } from 'react'
+import { createEffect, createSignal, Index, mergeProps, on, Show, type JSX } from 'solid-js'
 import type { ColumnInfo, RowOperation, TableData } from './types'
 import { Alert, ArrowDown, ArrowUp, Check, Code, Columns, X } from './icons'
 
@@ -28,8 +27,8 @@ type DataGridProps = {
   rowOffset?: number
 }
 
-function formatCell(value: unknown) {
-  if (value === null || value === undefined) return <span className="null-value">NULL</span>
+function formatCell(value: unknown): JSX.Element {
+  if (value === null || value === undefined) return <span class="null-value">NULL</span>
   if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
 }
@@ -82,16 +81,19 @@ export function buildDraftGrid(data: TableData, schema: ColumnInfo[], operations
   return { data: { ...data, rows }, meta }
 }
 
-export default function DataGrid({ data, sortColumn, sortDirection, onSort, compact = false, layoutKey, editable = false, onUpdate, rowMeta = [], selected = new Set(), onSelect, rowOffset = 0 }: DataGridProps) {
-  const [order, setOrder] = useState<string[]>(data.columns)
-  const [widths, setWidths] = useState<Record<string, number>>({})
-  const [dragging, setDragging] = useState('')
-  const [editing, setEditing] = useState<{ row: number; column: string; text: string; original: unknown } | null>(null)
-  const [saving, setSaving] = useState(false)
-  const [jsonCell, setJsonCell] = useState<{ row: number; column: string; value: unknown } | null>(null)
-  const cancelBlurRef = useRef(false)
+export default function DataGrid(raw: DataGridProps) {
+  const props = mergeProps({ compact: false, editable: false, rowMeta: [] as GridRowMeta[], rowOffset: 0 }, raw)
+  const selected = () => props.selected ?? new Set<string>()
+  const [order, setOrder] = createSignal<string[]>(props.data.columns)
+  const [widths, setWidths] = createSignal<Record<string, number>>({})
+  const [dragging, setDragging] = createSignal('')
+  const [editing, setEditing] = createSignal<{ row: number; column: string; text: string; original: unknown } | null>(null)
+  const [saving, setSaving] = createSignal(false)
+  const [jsonCell, setJsonCell] = createSignal<{ row: number; column: string; value: unknown } | null>(null)
+  let cancelBlur = false
 
-  useEffect(() => {
+  // Reload the stored layout whenever the tab's identity or column set changes.
+  createEffect(on(() => [props.layoutKey, props.data.columns.join('\u0000')] as const, ([layoutKey]) => {
     let savedOrder: string[] = []
     let savedWidths: Record<string, number> = {}
     if (layoutKey) {
@@ -101,120 +103,166 @@ export default function DataGrid({ data, sortColumn, sortDirection, onSort, comp
         savedWidths = saved.widths && typeof saved.widths === 'object' ? saved.widths : {}
       } catch { /* Ignore a corrupt local preference. */ }
     }
-    const valid = savedOrder.filter(column => data.columns.includes(column))
-    setOrder([...valid, ...data.columns.filter(column => !valid.includes(column))])
+    const valid = savedOrder.filter(column => props.data.columns.includes(column))
+    setOrder([...valid, ...props.data.columns.filter(column => !valid.includes(column))])
     setWidths(savedWidths)
-  }, [layoutKey, data.columns.join('\u0000')])
+  }))
 
-  useEffect(() => {
-    if (layoutKey && order.length) localStorage.setItem(`querynest:grid:${layoutKey}`, JSON.stringify({ order, widths }))
-  }, [layoutKey, order, widths])
+  createEffect(() => {
+    const layoutKey = props.layoutKey
+    const currentOrder = order()
+    const currentWidths = widths()
+    if (layoutKey && currentOrder.length) localStorage.setItem(`querynest:grid:${layoutKey}`, JSON.stringify({ order: currentOrder, widths: currentWidths }))
+  })
 
-  const shown = order.map(column => ({ column, source: data.columns.indexOf(column) })).filter(item => item.source >= 0)
-  const lastRowNumber = Math.max(1, data.total ?? 0, rowOffset + data.rows.length)
-  const rowNumberWidth = Math.max(52, 28 + String(lastRowNumber).length * 8)
-  const tableWidth = rowNumberWidth + shown.reduce((total, { column }) => total + (widths[column] ?? 160), 0)
+  const shown = () => order().map(column => ({ column, source: props.data.columns.indexOf(column) })).filter(item => item.source >= 0)
+  const columnWidth = (column: string) => widths()[column] ?? 160
+  const lastRowNumber = () => Math.max(1, props.data.total ?? 0, props.rowOffset + props.data.rows.length)
+  const rowNumberWidth = () => Math.max(52, 28 + String(lastRowNumber()).length * 8)
+  const tableWidth = () => rowNumberWidth() + shown().reduce((total, { column }) => total + columnWidth(column), 0)
 
-  function resize(event: ReactPointerEvent, column: string) {
+  function resize(event: PointerEvent, column: string) {
     event.preventDefault(); event.stopPropagation()
-    const start = event.clientX; const initial = widths[column] ?? 160
+    const start = event.clientX; const initial = columnWidth(column)
     const move = (next: PointerEvent) => setWidths(current => ({ ...current, [column]: Math.max(72, Math.min(600, initial + next.clientX - start)) }))
     const up = () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', up) }
     document.addEventListener('pointermove', move); document.addEventListener('pointerup', up)
   }
 
   function dropColumn(target: string) {
-    if (!dragging || dragging === target) return setDragging('')
+    const held = dragging()
+    if (!held || held === target) return setDragging('')
     setOrder(current => {
-      const next = current.filter(column => column !== dragging)
-      next.splice(next.indexOf(target), 0, dragging)
+      const next = current.filter(column => column !== held)
+      next.splice(next.indexOf(target), 0, held)
       return next
     })
     setDragging('')
   }
 
   async function commitEdit() {
-    if (!editing || !onUpdate || editing.text === String(editing.original ?? '')) return setEditing(null)
+    const active = editing()
+    if (!active || !props.onUpdate || active.text === String(active.original ?? '')) return setEditing(null)
     setSaving(true)
-    try { await onUpdate(editing.column, editing.row, editedValue(editing.text, editing.original)); setEditing(null) }
+    try { await props.onUpdate(active.column, active.row, editedValue(active.text, active.original)); setEditing(null) }
     catch { /* Parent surfaces the update error while keeping the editor open. */ }
     finally { setSaving(false) }
   }
 
-  if (!data.columns.length) return <div className="empty-grid">No result columns</div>
+  // A resize handle must never sort or reorder the column it sits on. Native listeners
+  // stop the event before Solid's delegated header handlers can see it.
+  const resizerFor = (column: () => string) => ({
+    class: 'column-resizer',
+    draggable: false,
+    'on:click': (event: Event) => event.stopPropagation(),
+    'on:dblclick': (event: Event) => event.stopPropagation(),
+    'on:dragstart': (event: Event) => { event.preventDefault(); event.stopPropagation() },
+    'on:pointerdown': (event: PointerEvent) => resize(event, column()),
+  })
+
   return (
-    <div className={`grid-scroll ${compact ? 'compact' : ''}`}>
-      <table className="data-grid" style={{ width: tableWidth, minWidth: tableWidth }}>
-        <colgroup><col className="row-col" style={{ width: rowNumberWidth }}/>{shown.map(({ column }) => <col key={column} style={{ width: widths[column] ?? 160 }}/>)}</colgroup>
-        <thead><tr><th className="row-number">#</th>{shown.map(({ column }, columnIndex) => (
-          <th key={column} aria-sort={onSort ? sortColumn === column ? sortDirection === 'asc' ? 'ascending' : 'descending' : 'none' : undefined} onClick={() => onSort?.(column)} draggable={Boolean(layoutKey)} onDragStart={() => setDragging(column)} onDragOver={event => event.preventDefault()} onDrop={() => dropColumn(column)} className={`${onSort ? 'sortable' : ''} ${dragging === column ? 'dragging' : ''}`}>
-            {layoutKey && columnIndex > 0 && <i className="column-resizer column-resizer-left" draggable={false} onClick={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()} onDragStart={event => { event.preventDefault(); event.stopPropagation() }} onPointerDown={event => resize(event, shown[columnIndex - 1].column)}/>}
-            <span>{column}</span>
-            {sortColumn === column && (sortDirection === 'asc' ? <ArrowUp size={13}/> : <ArrowDown size={13}/>)}
-            {layoutKey && <i className="column-resizer column-resizer-right" draggable={false} onClick={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()} onDragStart={event => { event.preventDefault(); event.stopPropagation() }} onPointerDown={event => resize(event, column)}/>}
-          </th>
-        ))}</tr></thead>
-        <tbody>{data.rows.map((row, rowIndex) => <tr key={rowMeta[rowIndex]?.id ?? rowIndex} className={`draft-${rowMeta[rowIndex]?.kind ?? 'clean'} ${selected.has(rowMeta[rowIndex]?.id ?? '') ? 'selected' : ''}`}>
-          <td className="row-number"><button className="row-selector" disabled={!onSelect || (rowMeta[rowIndex]?.kind !== 'insert' && !rowMeta[rowIndex]?.canEdit)} onClick={() => rowMeta[rowIndex] && onSelect?.(rowMeta[rowIndex].id)}>{selected.has(rowMeta[rowIndex]?.id ?? '') ? <Check size={11}/> : rowOffset + rowIndex + 1}</button></td>
-          {shown.map(({ column, source }) => {
-            const value = row[source]; const text = String(value ?? '')
-            const isStatus = column.toLowerCase() === 'status'; const json = jsonText(value)
-            const isEditing = editing?.row === rowIndex && editing.column === column
-            const canEdit = editable && (rowMeta[rowIndex]?.canEdit ?? true)
-            return <td key={column} className={canEdit ? 'editable-cell' : ''} onDoubleClick={() => { if (canEdit && onUpdate) { cancelBlurRef.current = false; setEditing({ row: rowIndex, column, text: String(value ?? ''), original: value }) } }}>
-              {isEditing ? <input className="cell-editor" autoFocus disabled={saving} value={editing.text} onChange={event => setEditing({ ...editing, text: event.target.value })} onKeyDown={event => {
-                if (event.key === 'Enter') event.currentTarget.blur()
-                if (event.key === 'Escape') { cancelBlurRef.current = true; setEditing(null); event.currentTarget.blur() }
-              }} onBlur={() => {
-                if (cancelBlurRef.current) { cancelBlurRef.current = false; return }
-                if (!saving) void commitEdit()
-              }}/>
-              : json ? <button className="json-cell" title={JSON.stringify(JSON.parse(json))} onClick={() => setJsonCell({ row: rowIndex, column, value })}><Code size={13}/><span className="json-preview">{JSON.stringify(JSON.parse(json))}</span></button>
-              : <span className={isStatus ? `status-pill ${text.toLowerCase()}` : ''}>{formatCell(value)}</span>}
-            </td>
-          })}
-        </tr>)}</tbody>
-      </table>
-      {jsonCell && <JsonModal value={jsonCell.value} editable={editable && (rowMeta[jsonCell.row]?.canEdit ?? true)} onClose={() => setJsonCell(null)} onSave={onUpdate ? async value => { await onUpdate(jsonCell.column, jsonCell.row, value); setJsonCell(null) } : undefined}/>} 
-    </div>
+    <Show when={props.data.columns.length} fallback={<div class="empty-grid">No result columns</div>}>
+      <div class={`grid-scroll ${props.compact ? 'compact' : ''}`}>
+        <table class="data-grid" style={{ width: `${tableWidth()}px`, 'min-width': `${tableWidth()}px` }}>
+          <colgroup><col class="row-col" style={{ width: `${rowNumberWidth()}px` }}/><Index each={shown()}>{item => <col style={{ width: `${columnWidth(item().column)}px` }}/>}</Index></colgroup>
+          <thead><tr><th class="row-number">#</th><Index each={shown()}>{(item, columnIndex) => (
+            <th
+              aria-sort={props.onSort ? props.sortColumn === item().column ? props.sortDirection === 'asc' ? 'ascending' : 'descending' : 'none' : undefined}
+              onClick={() => props.onSort?.(item().column)}
+              draggable={Boolean(props.layoutKey)}
+              onDragStart={() => setDragging(item().column)}
+              onDragOver={event => event.preventDefault()}
+              onDrop={() => dropColumn(item().column)}
+              class={`${props.onSort ? 'sortable' : ''} ${dragging() === item().column ? 'dragging' : ''}`}
+            >
+              <Show when={props.layoutKey && columnIndex > 0}>
+                <i {...resizerFor(() => shown()[columnIndex - 1].column)} class="column-resizer column-resizer-left"/>
+              </Show>
+              <span>{item().column}</span>
+              <Show when={props.sortColumn === item().column}>{props.sortDirection === 'asc' ? <ArrowUp size={13}/> : <ArrowDown size={13}/>}</Show>
+              <Show when={props.layoutKey}>
+                <i {...resizerFor(() => item().column)} class="column-resizer column-resizer-right"/>
+              </Show>
+            </th>
+          )}</Index></tr></thead>
+          <tbody><Index each={props.data.rows}>{(row, rowIndex) => {
+            const meta = () => props.rowMeta[rowIndex]
+            const rowID = () => meta()?.id ?? ''
+            return <tr class={`draft-${meta()?.kind ?? 'clean'} ${selected().has(rowID()) ? 'selected' : ''}`}>
+              <td class="row-number"><button class="row-selector" disabled={!props.onSelect || (meta()?.kind !== 'insert' && !meta()?.canEdit)} onClick={() => { const current = meta(); if (current) props.onSelect?.(current.id) }}>{selected().has(rowID()) ? <Check size={11}/> : props.rowOffset + rowIndex + 1}</button></td>
+              <Index each={shown()}>{item => {
+                const value = () => row()[item().source]
+                const text = () => String(value() ?? '')
+                const isStatus = () => item().column.toLowerCase() === 'status'
+                const json = () => jsonText(value())
+                const active = () => { const state = editing(); return state && state.row === rowIndex && state.column === item().column ? state : null }
+                const canEdit = () => props.editable && (meta()?.canEdit ?? true)
+                return <td class={canEdit() ? 'editable-cell' : ''} onDblClick={() => { if (canEdit() && props.onUpdate) { cancelBlur = false; setEditing({ row: rowIndex, column: item().column, text: String(value() ?? ''), original: value() }) } }}>
+                  <Show when={active()} fallback={
+                    <Show when={json()} fallback={<span class={isStatus() ? `status-pill ${text().toLowerCase()}` : ''}>{formatCell(value())}</span>}>
+                      <button class="json-cell" title={JSON.stringify(JSON.parse(json()!))} onClick={() => setJsonCell({ row: rowIndex, column: item().column, value: value() })}><Code size={13}/><span class="json-preview">{JSON.stringify(JSON.parse(json()!))}</span></button>
+                    </Show>
+                  }>{state => <input
+                    class="cell-editor"
+                    ref={el => queueMicrotask(() => el.focus())}
+                    disabled={saving()}
+                    value={state().text}
+                    onInput={event => setEditing(current => current ? { ...current, text: event.currentTarget.value } : current)}
+                    onKeyDown={event => {
+                      if (event.key === 'Enter') event.currentTarget.blur()
+                      if (event.key === 'Escape') { cancelBlur = true; setEditing(null); event.currentTarget.blur() }
+                    }}
+                    onBlur={() => {
+                      if (cancelBlur) { cancelBlur = false; return }
+                      if (!saving()) void commitEdit()
+                    }}
+                  />}</Show>
+                </td>
+              }}</Index>
+            </tr>
+          }}</Index></tbody>
+        </table>
+        <Show when={jsonCell()}>{cell => <JsonModal value={cell().value} editable={props.editable && (props.rowMeta[cell().row]?.canEdit ?? true)} onClose={() => setJsonCell(null)} onSave={props.onUpdate ? async value => { await props.onUpdate!(cell().column, cell().row, value); setJsonCell(null) } : undefined}/>}</Show>
+      </div>
+    </Show>
   )
 }
 
-function JsonModal({ value, editable, onClose, onSave }: { value: unknown; editable: boolean; onClose: () => void; onSave?: (value: string) => Promise<void> }) {
-  const [text, setText] = useState(jsonText(value) ?? '')
-  const [editing, setEditing] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [invalid, setInvalid] = useState('')
+function JsonModal(props: { value: unknown; editable: boolean; onClose: () => void; onSave?: (value: string) => Promise<void> }) {
+  const [text, setText] = createSignal(jsonText(props.value) ?? '')
+  const [editing, setEditing] = createSignal(false)
+  const [saving, setSaving] = createSignal(false)
+  const [invalid, setInvalid] = createSignal('')
 
   async function save() {
     try {
-      const formatted = JSON.stringify(JSON.parse(text), null, 2)
+      const formatted = JSON.stringify(JSON.parse(text()), null, 2)
       setInvalid(''); setSaving(true)
-      await onSave?.(formatted)
+      await props.onSave?.(formatted)
     } catch (error) {
       if (error instanceof SyntaxError) setInvalid(error.message)
     } finally { setSaving(false) }
   }
 
-  return <div className="modal-backdrop json-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
-    <section className="json-modal" role="dialog" aria-modal="true" aria-label="JSON viewer">
-      <header><div><span className="json-braces">{'{}'}</span><span><h3>JSON value</h3><p>{text.length.toLocaleString()} characters</p></span></div><div><button className="secondary" onClick={() => navigator.clipboard?.writeText(text)}><Columns size={14}/> Copy</button>{editable && <button className="secondary" onClick={() => setEditing(value => !value)}>{editing ? 'Preview' : 'Edit JSON'}</button>}<button className="icon-button" onClick={onClose}><X size={17}/></button></div></header>
-      <div className={`json-content ${editing ? 'editing' : ''}`}>{editing ? <textarea value={text} onChange={event => { setText(event.target.value); setInvalid('') }} spellCheck={false} autoFocus/> : <pre>{syntaxJSON(text)}</pre>}</div>
-      {invalid && <div className="json-error"><Alert size={14}/>{invalid}</div>}
-      <footer><span>{editing ? 'Changes are validated before saving' : 'Formatted JSON preview'}</span><div><button className="secondary" onClick={onClose}>Close</button>{editing && <button className="primary" disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save JSON'}</button>}</div></footer>
+  return <div class="modal-backdrop json-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) props.onClose() }}>
+    <section class="json-modal" role="dialog" aria-modal="true" aria-label="JSON viewer">
+      <header><div><span class="json-braces">{'{}'}</span><span><h3>JSON value</h3><p>{text().length.toLocaleString()} characters</p></span></div><div><button class="secondary" onClick={() => navigator.clipboard?.writeText(text())}><Columns size={14}/> Copy</button><Show when={props.editable}><button class="secondary" onClick={() => setEditing(value => !value)}>{editing() ? 'Preview' : 'Edit JSON'}</button></Show><button class="icon-button" onClick={props.onClose}><X size={17}/></button></div></header>
+      <div class={`json-content ${editing() ? 'editing' : ''}`}>{editing() ? <textarea value={text()} onInput={event => { setText(event.currentTarget.value); setInvalid('') }} spellcheck={false} ref={el => queueMicrotask(() => el.focus())}/> : <pre>{syntaxJSON(text())}</pre>}</div>
+      <Show when={invalid()}><div class="json-error"><Alert size={14}/>{invalid()}</div></Show>
+      <footer><span>{editing() ? 'Changes are validated before saving' : 'Formatted JSON preview'}</span><div><button class="secondary" onClick={props.onClose}>Close</button><Show when={editing()}><button class="primary" disabled={saving()} onClick={save}>{saving() ? 'Saving…' : 'Save JSON'}</button></Show></div></footer>
     </section>
   </div>
 }
 
 function syntaxJSON(text: string) {
   const parts = text.split(/("(?:\\.|[^"\\])*"\s*:|"(?:\\.|[^"\\])*"|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g)
-  return parts.map((part, index) => {
+  return parts.map(part => {
     let type = ''
     if (/^".*":$/.test(part)) type = 'json-key'
     else if (/^"/.test(part)) type = 'json-string'
     else if (/^(true|false)$/.test(part)) type = 'json-boolean'
     else if (part === 'null') type = 'json-null'
     else if (/^-?\d/.test(part)) type = 'json-number'
-    return type ? <span className={type} key={index}>{part}</span> : part
+    return type ? <span class={type}>{part}</span> : part
   })
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { createEffect, createSignal, onCleanup, onMount } from 'solid-js'
 import { api } from './bridge'
 import type { AppearancePreferences, SidebarPreferences, TransferPreferences } from './types'
 
@@ -23,18 +23,19 @@ function legacyPreferences(): SidebarPreferences {
 }
 
 export default function useSidebarPreferences(onError: (message: string) => void) {
-  const [values, setValues] = useState(legacyPreferences)
-  const [appearance, setAppearanceState] = useState(DEFAULT_APPEARANCE)
-  const [transfer, setTransferState] = useState(DEFAULT_TRANSFER)
-  const latest = useRef(values)
-  const [ready, setReady] = useState(false)
-  const saves = useRef(Promise.resolve())
+  const [values, setValues] = createSignal(legacyPreferences())
+  const [appearance, setAppearanceState] = createSignal(DEFAULT_APPEARANCE)
+  const [transfer, setTransferState] = createSignal(DEFAULT_TRANSFER)
+  const [ready, setReady] = createSignal(false)
+  let latest = values()
+  let saves = Promise.resolve()
 
-  useEffect(() => {
+  onMount(() => {
     let cancelled = false
-    api().LoadAppConfig(latest.current).then(config => {
+    onCleanup(() => { cancelled = true })
+    api().LoadAppConfig(latest).then(config => {
       if (cancelled) return
-      latest.current = config.sidebars
+      latest = config.sidebars
       setValues(config.sidebars)
       setAppearanceState(config.appearance)
       setTransferState(config.transfer)
@@ -42,48 +43,48 @@ export default function useSidebarPreferences(onError: (message: string) => void
     }).catch(error => {
       if (!cancelled) onError(`Could not load application settings: ${String(error)}`)
     })
-    return () => { cancelled = true }
-  }, [onError])
+  })
 
-  useEffect(() => {
-    document.documentElement.style.fontSize = `${appearance.fontSize}px`
-    document.documentElement.style.setProperty('--app-font-family', FONT_STACKS[appearance.fontFamily])
-  }, [appearance])
+  createEffect(() => {
+    const current = appearance()
+    document.documentElement.style.fontSize = `${current.fontSize}px`
+    document.documentElement.style.setProperty('--app-font-family', FONT_STACKS[current.fontFamily])
+  })
 
-  const setScale = useCallback((key: keyof SidebarPreferences, scale: number) => {
-    latest.current = { ...latest.current, [key]: Math.max(1, Math.min(2, scale)) }
-    setValues(latest.current)
-  }, [])
+  const setScale = (key: keyof SidebarPreferences, scale: number) => {
+    latest = { ...latest, [key]: Math.max(1, Math.min(2, scale)) }
+    setValues(latest)
+  }
 
-  const commit = useCallback(() => {
-    if (!ready) return
-    const snapshot = { ...latest.current }
+  const commit = () => {
+    if (!ready()) return
+    const snapshot = { ...latest }
     // Serialize writes so rapid changes cannot save an older size last.
-    saves.current = saves.current.then(() => api().SaveSidebarPreferences(snapshot)).catch(error => {
+    saves = saves.then(() => api().SaveSidebarPreferences(snapshot)).catch(error => {
       onError(`Could not save sidebar settings: ${String(error)}`)
     })
-  }, [ready, onError])
+  }
 
-  const setAppearance = useCallback((next: AppearancePreferences) => {
+  const setAppearance = (next: AppearancePreferences) => {
     const normalized: AppearancePreferences = {
       fontSize: Math.max(14, Math.min(20, Math.round(next.fontSize))),
       fontFamily: next.fontFamily in FONT_STACKS ? next.fontFamily : 'system',
     }
     setAppearanceState(normalized)
-    if (!ready) return
-    saves.current = saves.current.then(() => api().SaveAppearancePreferences(normalized)).catch(error => {
+    if (!ready()) return
+    saves = saves.then(() => api().SaveAppearancePreferences(normalized)).catch(error => {
       onError(`Could not save appearance settings: ${String(error)}`)
     })
-  }, [ready, onError])
+  }
 
-  const setTransfer = useCallback((next: TransferPreferences) => {
+  const setTransfer = (next: TransferPreferences) => {
     const normalized = { backupBatchSizeMB: Math.max(1, Math.min(10240, Math.round(next.backupBatchSizeMB))) }
     setTransferState(normalized)
-    if (!ready) return
-    saves.current = saves.current.then(() => api().SaveTransferPreferences(normalized)).catch(error => {
+    if (!ready()) return
+    saves = saves.then(() => api().SaveTransferPreferences(normalized)).catch(error => {
       onError(`Could not save data operation settings: ${String(error)}`)
     })
-  }, [ready, onError])
+  }
 
   return { values, setScale, commit, appearance, setAppearance, transfer, setTransfer, ready }
 }
