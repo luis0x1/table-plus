@@ -452,3 +452,24 @@ func sqliteVirtualTables(db *sql.DB) (map[string]string, error) {
 	}
 	return modules, rows.Err()
 }
+
+// sqliteAvailableModules lists the virtual table modules this build provides, so
+// a skipped table can say whether its module is missing or merely derived.
+func sqliteAvailableModules(db *sql.DB) (map[string]bool, error) {
+	rows, err := db.Query(`SELECT name FROM pragma_module_list`)
+	if err != nil {
+		// Introspection pragmas are optional; without them every module is
+		// reported as unknown rather than failing the caller.
+		return map[string]bool{}, nil
+	}
+	defer rows.Close()
+	modules := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("read SQLite modules: %w", err)
+		}
+		modules[strings.ToLower(name)] = true
+	}
+	return modules, rows.Err()
+}

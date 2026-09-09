@@ -344,6 +344,11 @@ func TestBackupSkipsVirtualTablesInsteadOfFailing(t *testing.T) {
 	if !strings.Contains(preview.Skipped[0].Reason, "VirtualElementary") {
 		t.Fatalf("reason does not name the module: %q", preview.Skipped[0].Reason)
 	}
+	// The module is absent from this build, so the reason must say so rather than
+	// claiming the rows are merely derived.
+	if !strings.Contains(preview.Skipped[0].Reason, "does not provide") {
+		t.Fatalf("reason does not report the missing module: %q", preview.Skipped[0].Reason)
+	}
 	for _, table := range preview.Tables {
 		if table.Name == "ElementaryGeometries" {
 			t.Fatal("virtual table was still queued for archiving")

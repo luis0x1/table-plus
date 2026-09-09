@@ -162,9 +162,12 @@ func (a *App) PreviewDatabaseBackup() (TransferPreview, error) {
 	if err != nil {
 		return TransferPreview{}, fmt.Errorf("preview backup: %w", err)
 	}
-	virtual := map[string]string{}
+	virtual, available := map[string]string{}, map[string]bool{}
 	if driver != driverPostgres {
 		if virtual, err = sqliteVirtualTables(db); err != nil {
+			return TransferPreview{}, fmt.Errorf("preview backup: %w", err)
+		}
+		if available, err = sqliteAvailableModules(db); err != nil {
 			return TransferPreview{}, fmt.Errorf("preview backup: %w", err)
 		}
 	}
@@ -177,8 +180,11 @@ func (a *App) PreviewDatabaseBackup() (TransferPreview, error) {
 		// loaded it cannot even be introspected. Skipping it keeps one such table
 		// from failing the whole backup, and the preview reports every skip.
 		if module, ok := virtual[table.Name]; ok {
-			preview.Skipped = append(preview.Skipped, TransferSkippedTable{Schema: table.Schema, Name: table.Name,
-				Reason: fmt.Sprintf("virtual table provided by the SQLite module %s; its rows are derived rather than stored", module)})
+			reason := fmt.Sprintf("virtual table provided by the SQLite module %s; its rows are derived rather than stored, so recreate it after restoring", module)
+			if !available[strings.ToLower(module)] {
+				reason = fmt.Sprintf("virtual table needs the SQLite module %s, which this build does not provide; it cannot be read at all", module)
+			}
+			preview.Skipped = append(preview.Skipped, TransferSkippedTable{Schema: table.Schema, Name: table.Name, Reason: reason})
 			continue
 		}
 		columns, err := a.GetTableSchema(table.Schema, table.Name)
