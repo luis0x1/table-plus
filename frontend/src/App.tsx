@@ -975,9 +975,43 @@ function DatabaseWorkspace(props: {
     catch { /* leave the empty entry so the fetch is not retried on every keystroke */ }
   }
 
-  const openBuffer = (name: string) => { if (!buffers[name]) setBuffers(name, { text: '', saved: '', result: null, running: false }) }
+  const openBuffer = (name: string) => { if (!buffers[name]) setBuffers(name, newScriptBuffer('')) }
   const editorText = () => buffers[activeScript()]?.text ?? ''
-  const setEditorText = (value: string) => setBuffers(activeScript(), 'text', value)
+  // A run of ordinary typing collapses into one undo step. A pause, a newline,
+  // or an edit that is not a single character - a paste, a completion, a cut -
+  // ends the group, which is what makes undo land where a writer expects.
+  function recordEdit(value: string, selection: { start: number; end: number }) {
+    const name = activeScript()
+    const buffer = buffers[name]
+    if (!buffer || buffer.text === value) return
+    const now = Date.now()
+    const delta = value.length - buffer.text.length
+    const typedNewline = delta === 1 && value.slice(0, selection.start).endsWith('\n')
+    const boundary = Math.abs(delta) !== 1 || typedNewline || now - buffer.editedAt > 550
+    const before = Math.max(0, selection.start - delta)
+    setBuffers(name, produce(state => {
+      if (boundary) state.past = [...state.past, { text: state.text, start: before, end: before }].slice(-historyLimit())
+      state.future = []
+      state.text = value
+      state.editedAt = now
+    }))
+  }
+
+  function stepHistory(from: 'past' | 'future', selection: { start: number; end: number }) {
+    const name = activeScript()
+    const buffer = buffers[name]
+    if (!buffer?.[from].length) return
+    const to = from === 'past' ? 'future' : 'past'
+    const snapshot = from === 'past' ? buffer.past[buffer.past.length - 1] : buffer.future[0]
+    setBuffers(name, produce(state => {
+      const current = { text: state.text, start: selection.start, end: selection.end }
+      state[to] = to === 'future' ? [current, ...state.future].slice(0, historyLimit()) : [...state.past, current].slice(-historyLimit())
+      state[from] = from === 'past' ? state.past.slice(0, -1) : state.future.slice(1)
+      state.text = snapshot.text
+      state.caret = { start: snapshot.start, end: snapshot.end, nonce: state.caret.nonce + 1 }
+      state.editedAt = 0
+    }))
+  }
   // The scratch buffer has no file behind it, so it is never "unsaved".
   const scriptDirty = (name = activeScript()) => Boolean(name) && Boolean(buffers[name]) && buffers[name].text !== buffers[name].saved
   const filteredScripts = createMemo(() => scripts().filter(script => script.name.toLowerCase().includes(sidebarFilter().toLowerCase())))
@@ -1010,7 +1044,7 @@ function DatabaseWorkspace(props: {
     try {
       const content = await db.ReadScript(name)
       batch(() => {
-        setBuffers(name, { text: content, saved: content, result: null, running: false })
+        setBuffers(name, newScriptBuffer(content))
         showScript(name)
       })
     } catch (e) { setError(String(e)) }
@@ -1453,7 +1487,10 @@ function DatabaseWorkspace(props: {
             running={buffers[activeScript()]?.running ?? false}
             tables={completionTables()}
             onNeedColumns={name => void loadColumnsFor(name)}
-            onInput={setEditorText}
+            caret={buffers[activeScript()]!.caret}
+            onInput={recordEdit}
+            onUndo={selection => stepHistory('past', selection)}
+            onRedo={selection => stepHistory('future', selection)}
             onRun={executeQuery}
             onSave={() => void saveScript().catch(() => {})}
             onClose={() => closeScript(activeScript())}
@@ -1576,7 +1613,23 @@ function SchemaView(props: { schema: ColumnInfo[]; indexes: IndexInfo[]; error: 
   </div>
 }
 
-type ScriptBuffer = { text: string; saved: string; result: QueryResult | null; running: boolean }
+type EditSnapshot = { text: string; start: number; end: number }
+
+type ScriptBuffer = {
+  text: string
+  saved: string
+  result: QueryResult | null
+  running: boolean
+  past: EditSnapshot[]
+  future: EditSnapshot[]
+  /** When the last edit landed, used to group a run of typing into one step. */
+  editedAt: number
+  /** A bumped nonce tells the editor to restore this caret. */
+  caret: { start: number; end: number; nonce: number }
+}
+
+const newScriptBuffer = (text: string): ScriptBuffer =>
+  ({ text, saved: text, result: null, running: false, past: [], future: [], editedAt: 0, caret: { start: 0, end: 0, nonce: 0 } })
 
 /**
  * ScriptPanel is the whole editing surface for one script: its own header with
@@ -1592,7 +1645,10 @@ function ScriptPanel(props: {
   running: boolean
   tables: CompletionTable[]
   onNeedColumns: (table: string) => void
-  onInput: (value: string) => void
+  caret: { start: number; end: number; nonce: number }
+  onInput: (value: string, selection: { start: number; end: number }) => void
+  onUndo: (selection: { start: number; end: number }) => void
+  onRedo: (selection: { start: number; end: number }) => void
   onRun: (statements: string[]) => void
   onSave: () => void
   onClose: () => void
@@ -1612,7 +1668,7 @@ function ScriptPanel(props: {
       </div>
     </header>
     <div class="script-body">
-      <SqlEditor value={props.text} running={props.running} tables={props.tables} onNeedColumns={props.onNeedColumns} onInput={props.onInput} onRun={props.onRun} onRunListChange={setRunList} onSave={props.name ? props.onSave : undefined}/>
+      <SqlEditor value={props.text} running={props.running} tables={props.tables} caret={props.caret} onNeedColumns={props.onNeedColumns} onInput={props.onInput} onUndo={props.onUndo} onRedo={props.onRedo} onRun={props.onRun} onRunListChange={setRunList} onSave={props.name ? props.onSave : undefined}/>
       <Show when={props.result} fallback={<section class="script-results empty"><div class="result-placeholder"><Play size={20}/><span>Run a statement to see its rows</span></div></section>}>{result =>
         <section class="script-results">
           <div class="result-meta"><Check size={13}/>{result().message}<span>{result().durationMs} ms</span></div>

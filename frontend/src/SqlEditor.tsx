@@ -5,7 +5,10 @@ type SqlEditorProps = {
   value: string
   running: boolean
   tables: CompletionTable[]
-  onInput: (value: string) => void
+  caret?: { start: number; end: number; nonce: number }
+  onInput: (value: string, selection: { start: number; end: number }) => void
+  onUndo?: (selection: { start: number; end: number }) => void
+  onRedo?: (selection: { start: number; end: number }) => void
   onRun: (statements: string[]) => void
   onSave?: () => void
   /** Reports what a run would cover, so the panel header can drive the button. */
@@ -120,7 +123,7 @@ export default function SqlEditor(props: SqlEditorProps) {
     const active = context()
     if (!active) return
     const caret = active.start + item.label.length
-    props.onInput(props.value.slice(0, active.start) + item.label + props.value.slice(active.end))
+    props.onInput(props.value.slice(0, active.start) + item.label + props.value.slice(active.end), { start: caret, end: caret })
     setCompleting(false)
     queueMicrotask(() => { input.focus(); input.setSelectionRange(caret, caret); syncSelection() })
   }
@@ -146,6 +149,12 @@ export default function SqlEditor(props: SqlEditorProps) {
     syncSelection()
   })
 
+  createEffect(on(() => props.caret?.nonce, () => {
+    const caret = props.caret
+    if (!caret) return
+    queueMicrotask(() => { input.focus(); input.setSelectionRange(caret.start, caret.end); syncSelection() })
+  }, { defer: true }))
+
   // Replacing the document from outside, such as opening another script, leaves
   // the old scroll offset behind on the layer that does not scroll itself.
   createEffect(on(() => props.value, () => queueMicrotask(syncScroll), { defer: true }))
@@ -165,7 +174,7 @@ export default function SqlEditor(props: SqlEditorProps) {
         autocapitalize="off"
         wrap="off"
         aria-label="SQL editor"
-        onInput={event => { props.onInput(event.currentTarget.value); syncSelection(); considerCompleting() }}
+        onInput={event => { props.onInput(event.currentTarget.value, { start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd }); syncSelection(); considerCompleting() }}
         onScroll={syncScroll}
         onSelect={syncSelection}
         onClick={syncSelection}
@@ -178,6 +187,16 @@ export default function SqlEditor(props: SqlEditorProps) {
             if (event.key === 'ArrowUp') { event.preventDefault(); setHighlighted(index => (index - 1 + suggestions().length) % suggestions().length); return }
             if (event.key === 'Enter' || event.key === 'Tab') { event.preventDefault(); accept(suggestions()[highlighted()]); return }
             if (event.key === 'Escape') { event.preventDefault(); setCompleting(false); return }
+          }
+          const step = (event.metaKey || event.ctrlKey) && (event.key.toLowerCase() === 'z' || event.key.toLowerCase() === 'y')
+          if (step) {
+            // Setting value from outside clears the textarea's own undo stack,
+            // so the history has to be ours end to end.
+            event.preventDefault()
+            const selection = { start: input.selectionStart, end: input.selectionEnd }
+            if (event.key.toLowerCase() === 'y' || event.shiftKey) props.onRedo?.(selection)
+            else props.onUndo?.(selection)
+            return
           }
           if ((event.ctrlKey || event.metaKey) && event.key === ' ') { event.preventDefault(); setCompleting(true); return }
           if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); props.onRun(runList().map(statement => statement.body)) }
