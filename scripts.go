@@ -193,7 +193,7 @@ func (a *App) SaveScript(name, content string) (ScriptFile, error) {
 	if err := os.Chmod(temp.Name(), 0o600); err != nil {
 		return ScriptFile{}, fmt.Errorf("set script permissions: %w", err)
 	}
-	if err := os.Rename(temp.Name(), path); err != nil {
+	if err := replaceFile(temp.Name(), path); err != nil {
 		return ScriptFile{}, fmt.Errorf("replace script: %w", err)
 	}
 	return describeScript(dir, filepath.Base(path))
