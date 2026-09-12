@@ -4,14 +4,21 @@ import type { AppearancePreferences, EditingPreferences, SidebarPreferences, Tra
 
 export const DEFAULT_APPEARANCE: AppearancePreferences = { fontSize: 17, fontFamily: 'system' }
 export const DEFAULT_TRANSFER: TransferPreferences = { backupBatchSizeMB: 500 }
-export const DEFAULT_EDITING: EditingPreferences = { undoHistoryLimit: 100 }
+export const DEFAULT_EDITING: EditingPreferences = { undoHistoryLimit: 100, caretWidth: 2, editorFontSize: 12, editorFontFamily: 'mono' }
 export const UNDO_HISTORY_RANGE = { min: 10, max: 1000 }
+export const CARET_WIDTH_RANGE = { min: 1, max: 4 }
+export const EDITOR_FONT_SIZE_RANGE = { min: 10, max: 24 }
 
-export const FONT_STACKS: Record<AppearancePreferences['fontFamily'], string> = {
+export const FONT_STACKS: Record<string, string> = {
   system: 'Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
   humanist: '"Trebuchet MS", "Avenir Next", Avenir, ui-sans-serif, sans-serif',
   serif: 'Georgia, Cambria, "Times New Roman", serif',
   mono: 'ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace',
+}
+
+function quotedFontFamily(value: string, fallback: 'sans-serif' | 'monospace') {
+  if (FONT_STACKS[value]) return FONT_STACKS[value]
+  return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}", ${fallback}`
 }
 
 function legacyPreferences(): SidebarPreferences {
@@ -52,7 +59,14 @@ export default function useSidebarPreferences(onError: (message: string) => void
   createEffect(() => {
     const current = appearance()
     document.documentElement.style.fontSize = `${current.fontSize}px`
-    document.documentElement.style.setProperty('--app-font-family', FONT_STACKS[current.fontFamily])
+    document.documentElement.style.setProperty('--app-font-family', quotedFontFamily(current.fontFamily, 'sans-serif'))
+  })
+
+  createEffect(() => {
+    const current = editing()
+    document.documentElement.style.setProperty('--editor-caret-width', `${current.caretWidth}px`)
+    document.documentElement.style.setProperty('--editor-font-size', `${current.editorFontSize}px`)
+    document.documentElement.style.setProperty('--editor-font-family', quotedFontFamily(current.editorFontFamily, 'monospace'))
   })
 
   const setScale = (key: keyof SidebarPreferences, scale: number) => {
@@ -72,7 +86,7 @@ export default function useSidebarPreferences(onError: (message: string) => void
   const setAppearance = (next: AppearancePreferences) => {
     const normalized: AppearancePreferences = {
       fontSize: Math.max(14, Math.min(20, Math.round(next.fontSize))),
-      fontFamily: next.fontFamily in FONT_STACKS ? next.fontFamily : 'system',
+      fontFamily: next.fontFamily.trim() || 'system',
     }
     setAppearanceState(normalized)
     if (!ready()) return
@@ -91,7 +105,12 @@ export default function useSidebarPreferences(onError: (message: string) => void
   }
 
   const setEditing = (next: EditingPreferences) => {
-    const normalized = { undoHistoryLimit: Math.max(UNDO_HISTORY_RANGE.min, Math.min(UNDO_HISTORY_RANGE.max, Math.round(next.undoHistoryLimit))) }
+    const normalized = {
+      undoHistoryLimit: Math.max(UNDO_HISTORY_RANGE.min, Math.min(UNDO_HISTORY_RANGE.max, Math.round(next.undoHistoryLimit))),
+      caretWidth: Math.max(CARET_WIDTH_RANGE.min, Math.min(CARET_WIDTH_RANGE.max, Math.round(next.caretWidth))),
+      editorFontSize: Math.max(EDITOR_FONT_SIZE_RANGE.min, Math.min(EDITOR_FONT_SIZE_RANGE.max, Math.round(next.editorFontSize))),
+      editorFontFamily: next.editorFontFamily.trim() || 'mono',
+    }
     setEditingState(normalized)
     if (!ready()) return
     saves = saves.then(() => api().SaveEditingPreferences(normalized)).catch(error => {

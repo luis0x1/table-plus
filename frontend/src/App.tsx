@@ -1,15 +1,17 @@
-import { batch, createEffect, createMemo, createSignal, createUniqueId, For, Index, on, onCleanup, onMount, Show, type JSX, type Setter } from 'solid-js'
+import { batch, createEffect, createMemo, createSignal, createUniqueId, For, Index, lazy, on, onCleanup, onMount, Show, Suspense, type JSX, type Setter } from 'solid-js'
 import { createStore, produce, unwrap } from 'solid-js/store'
 import { api, databaseApi, isDesktop, windowAction } from './bridge'
 import TabStrip from './TabStrip'
 import DatabasePicker from './DatabasePicker'
 import DataGrid, { buildDraftGrid, type PendingOperation } from './DataGrid'
-import SqlEditor from './SqlEditor'
+import type { EditorSelection } from './SqlEditor'
 import { pageQuery, planPagination, type CompletionTable, type PaginationPlan, type SqlStatement } from './sql'
-import useSidebarPreferences, { UNDO_HISTORY_RANGE } from './useSidebarPreferences'
+import useSidebarPreferences, { CARET_WIDTH_RANGE, DEFAULT_APPEARANCE, DEFAULT_EDITING, DEFAULT_TRANSFER, EDITOR_FONT_SIZE_RANGE, FONT_STACKS, UNDO_HISTORY_RANGE } from './useSidebarPreferences'
 import SidebarResizeHandle, { useCompactSidebar, useSidebarWidth, type SidebarSizing } from './SidebarResizeHandle'
 import type { AppearancePreferences, ColumnInfo, ConnectionStatus, EditingPreferences, IndexInfo, PostgresConfig, QueryResult, SavedConnection, SavedConnectionUpdate, ScriptFile, TableData, TableRef, TableSummary, TransferPreferences, TransferPreview, TransferResult } from './types'
-import { Alert, Check, ChevronDown, ChevronRight, Clock, Code, Columns, Command, Copy, Database, Edit, Eye, File, Filter, Key, More, PanelLeft, Pin, Play, Plus, Redo, Refresh, Save, Search, Settings, Table, Trash, Undo, X } from './icons'
+import { Alert, Check, ChevronDown, ChevronRight, Clock, Code, Columns, Command, Copy, Database, Edit, Eye, File, Filter, Key, More, PanelLeft, Pending, Pin, Play, Plus, Redo, Refresh, Save, Search, Settings, Table, Trash, Undo, X } from './icons'
+
+const SqlEditor = lazy(() => import('./SqlEditor'))
 
 const emptyData = (): TableData => ({ columns: [], rows: [], total: 0, durationMs: 0 })
 const PAGE_SIZE = 50
@@ -30,6 +32,21 @@ type WorkspaceSession = ConnectionStatus & {
   profile?: SavedConnection
   returnToID?: string
   retryDatabase?: { sourceID: string; database: string }
+}
+type DatabaseActivity = {
+  id: string
+  sessionID: string
+  database: string
+  source: 'script' | 'database'
+  statement: string
+  status: 'queued' | 'running' | 'cancelling'
+  startedAt: number
+}
+type ActivityController = {
+  enqueue: (activity: Omit<DatabaseActivity, 'id' | 'status' | 'startedAt'>) => string
+  start: (id: string) => void
+  finish: (id: string) => void
+  cancelled: (id: string) => boolean
 }
 
 type TableTabState = {
@@ -237,21 +254,84 @@ function Welcome(props: SavedConnectionsProps & { onOpen: () => void; onPostgres
   </main>
 }
 
-const FONT_OPTIONS: { value: AppearancePreferences['fontFamily']; label: string; description: string }[] = [
-  { value: 'system', label: 'System', description: 'Clean and familiar' },
-  { value: 'humanist', label: 'Humanist', description: 'Warm and readable' },
-  { value: 'serif', label: 'Serif', description: 'Classic and distinctive' },
-  { value: 'mono', label: 'Monospace', description: 'Technical and precise' },
+const CARET_WIDTH_OPTIONS = [
+  { value: 1, label: 'Thin' },
+  { value: 2, label: 'Default' },
+  { value: 3, label: 'Thick' },
+  { value: 4, label: 'Extra' },
 ]
+
+const BUILTIN_FONTS = [
+  { value: 'system', label: 'System default' },
+  { value: 'humanist', label: 'System humanist' },
+  { value: 'serif', label: 'System serif' },
+  { value: 'mono', label: 'System monospace' },
+]
+
+function FontPicker(props: { value: string; fonts: string[]; loading: boolean; label: string; onChange: (value: string) => void; onRefresh: () => void }) {
+  const [open, setOpen] = createSignal(false)
+  const [search, setSearch] = createSignal('')
+  let root!: HTMLDivElement
+  let searchInput!: HTMLInputElement
+  const options = createMemo(() => {
+    const seen = new Set<string>()
+    const values = [...BUILTIN_FONTS, ...props.fonts.map(font => ({ value: font, label: font }))]
+    const query = search().trim().toLocaleLowerCase()
+    return values.filter(option => {
+      const key = option.value.toLocaleLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return !query || option.label.toLocaleLowerCase().includes(query)
+    })
+  })
+  const selectedLabel = () => BUILTIN_FONTS.find(option => option.value === props.value)?.label ?? props.value
+  const exactMatch = () => {
+    const query = search().trim().toLocaleLowerCase()
+    return !query || [...BUILTIN_FONTS.map(option => option.value), ...props.fonts].some(font => font.toLocaleLowerCase() === query)
+  }
+  const choose = (value: string) => {
+    props.onChange(value)
+    setSearch('')
+    setOpen(false)
+  }
+
+  onMount(() => {
+    const close = (event: PointerEvent) => { if (!root.contains(event.target as Node)) { setOpen(false); setSearch('') } }
+    document.addEventListener('pointerdown', close)
+    onCleanup(() => document.removeEventListener('pointerdown', close))
+  })
+  createEffect(() => { if (open()) queueMicrotask(() => searchInput?.focus()) })
+
+  return <div ref={root} class="font-family-control">
+    <button type="button" class={`font-picker-trigger ${open() ? 'open' : ''}`} aria-label={props.label} aria-haspopup="listbox" aria-expanded={open()} onClick={() => setOpen(value => !value)}>
+      <span class="font-picker-mark" style={{ 'font-family': FONT_STACKS[props.value] ?? props.value }}>Aa</span><span><b>{selectedLabel()}</b><small>{props.loading ? 'Scanning installed fonts…' : `${props.fonts.length.toLocaleString()} installed fonts`}</small></span><ChevronDown size={15}/>
+    </button>
+    <Show when={open()}>
+      <div class="font-picker-popover">
+        <label class="font-picker-search"><Search size={14}/><input ref={searchInput} value={search()} placeholder="Search installed fonts…" aria-label="Search installed fonts" onInput={event => setSearch(event.currentTarget.value)}/><Show when={search()}><button type="button" onClick={() => { setSearch(''); searchInput.focus() }} aria-label="Clear font search"><X size={13}/></button></Show></label>
+        <div class="font-picker-list" role="listbox" aria-label={props.label}>
+          <For each={options()}>{option => <button type="button" role="option" aria-selected={props.value === option.value} class={props.value === option.value ? 'selected' : ''} onClick={() => choose(option.value)}><span class="font-option-sample" style={{ 'font-family': FONT_STACKS[option.value] ?? option.value }}>Aa</span><span>{option.label}</span><Show when={props.value === option.value}><Check size={14}/></Show></button>}</For>
+          <Show when={search().trim() && !exactMatch()}><button type="button" class="font-custom-option" onClick={() => choose(search().trim())}><Plus size={14}/><span>Use “{search().trim()}”</span></button></Show>
+          <Show when={!options().length && !search().trim()}><div class="font-picker-empty">No installed fonts found.</div></Show>
+        </div>
+        <footer><span>{props.loading ? 'Scanning fonts…' : `${props.fonts.length.toLocaleString()} fonts available`}</span><button type="button" disabled={props.loading} onClick={props.onRefresh}><Refresh size={13} class={props.loading ? 'spin' : ''}/> Refresh</button></footer>
+      </div>
+    </Show>
+  </div>
+}
 
 function AppearanceModal(props: {
   appearance: AppearancePreferences
   transfer: TransferPreferences
   editing: EditingPreferences
+  fonts: string[]
+  fontsLoading: boolean
   ready: boolean
   onChange: (next: AppearancePreferences) => void
   onTransferChange: (next: TransferPreferences) => void
   onEditingChange: (next: EditingPreferences) => void
+  onRefreshFonts: () => void
+  onReset: () => void
   onClose: () => void
 }) {
   onMount(() => {
@@ -265,45 +345,134 @@ function AppearanceModal(props: {
     <section class="appearance-modal" role="dialog" aria-modal="true" aria-labelledby="appearance-title">
       <header>
         <div class="modal-mark"><Settings size={18}/></div>
-        <div><h3 id="appearance-title">Settings</h3><p>Appearance and data operation preferences.</p></div>
+        <div><h3 id="appearance-title">Settings</h3><p>Interface, editor, history, and data preferences.</p></div>
         <button class="icon-button" onClick={props.onClose} aria-label="Close appearance settings"><X size={16}/></button>
       </header>
       <div class="appearance-content">
-        <section class="appearance-section">
-          <div class="setting-heading"><div><b>Global font size</b><small>Scales text throughout the application.</small></div><output>{props.appearance.fontSize} px</output></div>
+        <div class="settings-group-heading"><span>Interface</span><small>Typography used throughout QueryNest</small></div>
+        <section class="appearance-section typography-settings">
+          <div class="setting-heading"><div><b>Font size</b><small>Scales text throughout the application.</small></div><output>{props.appearance.fontSize} px</output></div>
           <div class="font-size-control">
             <button onClick={() => changeSize(props.appearance.fontSize - 1)} disabled={!props.ready || props.appearance.fontSize <= 14} aria-label="Decrease font size">A−</button>
             <input type="range" min="14" max="20" step="1" value={props.appearance.fontSize} disabled={!props.ready} aria-label="Global font size" onInput={event => changeSize(Number(event.currentTarget.value))}/>
             <button onClick={() => changeSize(props.appearance.fontSize + 1)} disabled={!props.ready || props.appearance.fontSize >= 20} aria-label="Increase font size">A+</button>
           </div>
           <div class="range-labels" aria-hidden="true"><span>Compact</span><span>Large</span></div>
+          <div class="setting-divider"/>
+          <div class="setting-heading compact"><div><b>Font family</b><small>Choose from fonts installed on this computer.</small></div></div>
+          <FontPicker value={props.appearance.fontFamily} fonts={props.fonts} loading={props.fontsLoading} label="Interface font family" onRefresh={props.onRefreshFonts} onChange={fontFamily => props.onChange({ ...props.appearance, fontFamily })}/>
         </section>
+
+        <div class="settings-group-heading"><span>Editor</span><small>SQL editor typography and cursor</small></div>
+        <section class="appearance-section typography-settings">
+          <div class="setting-heading"><div><b>Font size</b><small>Changes SQL text without scaling the rest of the interface.</small></div><output>{props.editing.editorFontSize} px</output></div>
+          <div class="font-size-control editor-font-size-control">
+            <button onClick={() => props.onEditingChange({ ...props.editing, editorFontSize: props.editing.editorFontSize - 1 })} disabled={!props.ready || props.editing.editorFontSize <= EDITOR_FONT_SIZE_RANGE.min} aria-label="Decrease editor font size">A−</button>
+            <input type="range" min={EDITOR_FONT_SIZE_RANGE.min} max={EDITOR_FONT_SIZE_RANGE.max} step="1" value={props.editing.editorFontSize} disabled={!props.ready} aria-label="Editor font size" onInput={event => props.onEditingChange({ ...props.editing, editorFontSize: Number(event.currentTarget.value) })}/>
+            <button onClick={() => props.onEditingChange({ ...props.editing, editorFontSize: props.editing.editorFontSize + 1 })} disabled={!props.ready || props.editing.editorFontSize >= EDITOR_FONT_SIZE_RANGE.max} aria-label="Increase editor font size">A+</button>
+          </div>
+          <div class="range-labels" aria-hidden="true"><span>Compact</span><span>Large</span></div>
+          <div class="setting-divider"/>
+          <div class="setting-heading compact"><div><b>Font family</b><small>Use any installed font for SQL code.</small></div></div>
+          <FontPicker value={props.editing.editorFontFamily} fonts={props.fonts} loading={props.fontsLoading} label="Editor font family" onRefresh={props.onRefreshFonts} onChange={editorFontFamily => props.onEditingChange({ ...props.editing, editorFontFamily })}/>
+          <div class="setting-divider"/>
+          <div class="setting-heading"><div><b>Editor caret width</b><small>Adjust the thickness of the text cursor in SQL editors.</small></div><output>{props.editing.caretWidth} px</output></div>
+          <div class="caret-width-options" role="radiogroup" aria-label="Editor caret width">
+            <For each={CARET_WIDTH_OPTIONS}>{option => <button role="radio" aria-checked={props.editing.caretWidth === option.value} class={props.editing.caretWidth === option.value ? 'active' : ''} disabled={!props.ready || option.value < CARET_WIDTH_RANGE.min || option.value > CARET_WIDTH_RANGE.max} onClick={() => props.onEditingChange({ ...props.editing, caretWidth: option.value })}>
+              <i class={`caret-preview width-${option.value}`}/><span>{option.label}</span>
+            </button>}</For>
+          </div>
+        </section>
+
+        <div class="settings-group-heading"><span>History</span><small>Memory used for local editing</small></div>
+        <section class="appearance-section">
+          <div class="setting-heading"><div><b>Undo history limit</b><small>How many draft changes each table tab can step back through.</small></div><output>{props.editing.undoHistoryLimit.toLocaleString()} changes</output></div>
+          <label class="batch-size-control"><input type="number" min={UNDO_HISTORY_RANGE.min} max={UNDO_HISTORY_RANGE.max} step="1" value={props.editing.undoHistoryLimit} disabled={!props.ready} aria-label="Undo history limit" onInput={event => props.onEditingChange({ ...props.editing, undoHistoryLimit: Number(event.currentTarget.value) || UNDO_HISTORY_RANGE.min })}/><span>changes</span></label>
+          <div class="batch-size-hint">The default is 100. Each step keeps a snapshot of that tab's pending changes, so a lower limit releases memory sooner.</div>
+        </section>
+
+        <div class="settings-group-heading"><span>Data operations</span><small>Backup and transfer behaviour</small></div>
         <section class="appearance-section">
           <div class="setting-heading"><div><b>Backup batch size</b><small>Flushes streamed backup data and writes a recovery checkpoint at this interval.</small></div><output>{props.transfer.backupBatchSizeMB.toLocaleString()} MB</output></div>
           <label class="batch-size-control"><input type="number" min="1" max="10240" step="1" value={props.transfer.backupBatchSizeMB} disabled={!props.ready} onInput={event => props.onTransferChange({ backupBatchSizeMB: Number(event.currentTarget.value) || 1 })}/><span>MB</span></label>
           <div class="batch-size-hint">The default is 500 MB. Data is streamed continuously and is not buffered to this size in memory.</div>
         </section>
-        <section class="appearance-section">
-          <div class="setting-heading"><div><b>Undo history limit</b><small>How many draft changes each table tab can step back through.</small></div><output>{props.editing.undoHistoryLimit.toLocaleString()} changes</output></div>
-          <label class="batch-size-control"><input type="number" min={UNDO_HISTORY_RANGE.min} max={UNDO_HISTORY_RANGE.max} step="1" value={props.editing.undoHistoryLimit} disabled={!props.ready} aria-label="Undo history limit" onInput={event => props.onEditingChange({ undoHistoryLimit: Number(event.currentTarget.value) || UNDO_HISTORY_RANGE.min })}/><span>changes</span></label>
-          <div class="batch-size-hint">The default is 100. Each step keeps a snapshot of that tab's pending changes, so a lower limit releases memory sooner.</div>
-        </section>
-        <section class="appearance-section">
-          <div class="setting-heading"><div><b>Global font family</b><small>Choose the typeface used by the interface.</small></div></div>
-          <div class="font-options" role="radiogroup" aria-label="Global font family">
-            <For each={FONT_OPTIONS}>{option => <button role="radio" aria-checked={props.appearance.fontFamily === option.value} class={props.appearance.fontFamily === option.value ? 'active' : ''} disabled={!props.ready} onClick={() => props.onChange({ ...props.appearance, fontFamily: option.value })}>
-              <span class={`font-sample ${option.value}`}>Aa</span><span><b>{option.label}</b><small>{option.description}</small></span><i/>
-            </button>}</For>
-          </div>
-        </section>
         <div class="appearance-preview"><span>Preview</span><p>Query your data with clarity.</p><small>SELECT * FROM customers;</small></div>
       </div>
-      <footer><button class="secondary" disabled={!props.ready} onClick={() => props.onChange({ fontSize: 17, fontFamily: 'system' })}>Reset defaults</button><button class="primary" onClick={props.onClose}>Done</button></footer>
+      <footer><button class="secondary reset-settings" disabled={!props.ready} onClick={props.onReset}><Refresh size={14}/> Reset all settings</button><button class="primary" onClick={props.onClose}>Done</button></footer>
     </section>
   </div>
 }
 
-function TitleBar(props: { onSettings: () => void }) {
+function activitySummary(statement: string) {
+  const compact = statement.replace(/\s+/g, ' ').trim()
+  return compact.length > 110 ? `${compact.slice(0, 107)}…` : compact
+}
+
+function ActivityCenter(props: {
+  activities: DatabaseActivity[]
+  onCancel: (id: string) => void
+  onCancelAll: () => void
+}) {
+  const [open, setOpen] = createSignal(false)
+  const [now, setNow] = createSignal(Date.now())
+  let root!: HTMLDivElement
+
+  onMount(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    const close = (event: PointerEvent) => { if (!root.contains(event.target as Node)) setOpen(false) }
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false) }
+    document.addEventListener('pointerdown', close)
+    window.addEventListener('keydown', escape)
+    onCleanup(() => {
+      window.clearInterval(timer)
+      document.removeEventListener('pointerdown', close)
+      window.removeEventListener('keydown', escape)
+    })
+  })
+
+  const elapsed = (startedAt: number) => {
+    const seconds = Math.max(0, Math.floor((now() - startedAt) / 1000))
+    if (seconds < 60) return `${seconds}s`
+    return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+  }
+
+  return <div ref={root} class="activity-center">
+    <button
+      class={`icon-button activity-trigger ${props.activities.length ? 'active' : ''}`}
+      onClick={() => setOpen(value => !value)}
+      onDblClick={event => event.stopPropagation()}
+      aria-label="Pending database commands"
+      aria-expanded={open()}
+      title="Pending database commands"
+    >
+      <Pending size={15}/>
+      <Show when={props.activities.length}><b>{props.activities.length > 9 ? '9+' : props.activities.length}</b></Show>
+    </button>
+    <Show when={open()}>
+      <section class="activity-popover" onDblClick={event => event.stopPropagation()}>
+        <header>
+          <div><b>Pending commands</b><span>{props.activities.length ? `${props.activities.length} active or queued` : 'Database activity will appear here'}</span></div>
+          <Show when={props.activities.length}><button class="cancel-all" onClick={props.onCancelAll}>Cancel all</button></Show>
+        </header>
+        <Show when={props.activities.length} fallback={<div class="activity-empty"><Check size={18}/><b>No pending commands</b><span>All database operations are complete.</span></div>}>
+          <div class="activity-list"><For each={props.activities}>{activity =>
+            <article class={`activity-item ${activity.status}`}>
+              <div class="activity-state"><Show when={activity.status === 'queued'} fallback={<Refresh size={14} class={activity.status === 'running' ? 'spin' : ''}/>}><Clock size={14}/></Show></div>
+              <div class="activity-copy">
+                <div><b>{activity.source === 'script' ? 'SQL script' : 'Database change'}</b><span>{activity.database}</span><time>{activity.status === 'queued' ? 'Queued' : activity.status === 'cancelling' ? 'Cancelling…' : elapsed(activity.startedAt)}</time></div>
+                <code title={activity.statement}>{activitySummary(activity.statement)}</code>
+              </div>
+              <button class="activity-cancel" disabled={activity.status === 'cancelling'} onClick={() => props.onCancel(activity.id)} aria-label={`Cancel ${activitySummary(activity.statement)}`} title="Cancel command"><X size={14}/></button>
+            </article>
+          }</For></div>
+        </Show>
+      </section>
+    </Show>
+  </div>
+}
+
+function TitleBar(props: { activities: DatabaseActivity[]; onCancel: (id: string) => void; onCancelAll: () => void; onSettings: () => void }) {
   return <div class="titlebar" onDblClick={() => windowAction('maximise')}>
     <div class="traffic-lights">
       <button aria-label="Close" onClick={() => windowAction('close')}/>
@@ -311,7 +480,7 @@ function TitleBar(props: { onSettings: () => void }) {
       <button aria-label="Maximise" onClick={() => windowAction('maximise')}/>
     </div>
     <div class="drag-title">QueryNest</div>
-    <div class="titlebar-actions"><button class="icon-button appearance-trigger" onClick={props.onSettings} onDblClick={event => event.stopPropagation()} aria-label="Appearance settings" title="Appearance settings"><Settings size={15}/></button><div class="build-tag">{isDesktop() ? 'LOCAL' : 'BROWSER PREVIEW'}</div></div>
+    <div class="titlebar-actions"><ActivityCenter activities={props.activities} onCancel={props.onCancel} onCancelAll={props.onCancelAll}/><button class="icon-button appearance-trigger" onClick={props.onSettings} onDblClick={event => event.stopPropagation()} aria-label="Appearance settings" title="Appearance settings"><Settings size={15}/></button><div class="build-tag">{isDesktop() ? 'LOCAL' : 'BROWSER PREVIEW'}</div></div>
   </div>
 }
 
@@ -328,9 +497,76 @@ export default function App() {
   const [editingConnection, setEditingConnection] = createSignal<SavedConnection | null>(null)
   const [failedConnection, setFailedConnection] = createSignal<WorkspaceSession | null>(null)
   const [appearanceOpen, setAppearanceOpen] = createSignal(false)
+  const [systemFonts, setSystemFonts] = createSignal<string[]>([])
+  const [systemFontsLoading, setSystemFontsLoading] = createSignal(false)
+  let systemFontsLoaded = false
   const [connectionConfig, setConnectionConfig] = createSignal<PostgresConfig>(DEFAULT_POSTGRES_CONFIG)
   const [savedConnections, setSavedConnections] = createSignal<SavedConnection[]>([])
+  const [activities, setActivities] = createSignal<DatabaseActivity[]>([])
+  const cancelledActivities = new Set<string>()
   const workspaces = new Map<string, WorkspaceHandle>()
+
+  async function loadSystemFonts(force = false) {
+    if ((!force && systemFontsLoaded) || systemFontsLoading()) return
+    setSystemFontsLoading(true)
+    const backend = api()
+    const [scanned, local] = await Promise.allSettled([
+      typeof backend.ListSystemFonts === 'function' ? backend.ListSystemFonts() : Promise.resolve([]),
+      window.queryLocalFonts?.() ?? Promise.resolve([]),
+    ])
+    const names = [
+      ...(scanned.status === 'fulfilled' ? scanned.value : []),
+      ...(local.status === 'fulfilled' ? local.value.map(font => font.family) : []),
+    ].map(font => font.trim()).filter(Boolean)
+    const unique = [...new Map(names.map(font => [font.toLocaleLowerCase(), font])).values()]
+      .sort((left, right) => left.localeCompare(right))
+    if (scanned.status === 'fulfilled' || local.status === 'fulfilled') {
+      setSystemFonts(unique)
+      systemFontsLoaded = true
+    } else {
+      setError(`Could not list installed fonts: ${String(scanned.reason)}`)
+    }
+    setSystemFontsLoading(false)
+  }
+
+  function openSettings() {
+    setAppearanceOpen(true)
+    void loadSystemFonts()
+  }
+
+  function resetSettings() {
+    sidebarPreferences.setAppearance(DEFAULT_APPEARANCE)
+    sidebarPreferences.setEditing(DEFAULT_EDITING)
+    sidebarPreferences.setTransfer(DEFAULT_TRANSFER)
+  }
+
+  const activityController: ActivityController = {
+    enqueue(activity) {
+      const id = globalThis.crypto?.randomUUID?.() ?? `operation:${Date.now()}:${Math.random()}`
+      setActivities(current => [...current, { ...activity, id, status: 'queued', startedAt: Date.now() }])
+      return id
+    },
+    start(id) {
+      setActivities(current => current.map(activity => activity.id === id ? { ...activity, status: 'running', startedAt: Date.now() } : activity))
+    },
+    finish(id) {
+      cancelledActivities.delete(id)
+      setActivities(current => current.filter(activity => activity.id !== id))
+    },
+    cancelled(id) { return cancelledActivities.has(id) },
+  }
+
+  function cancelActivity(id: string) {
+    const activity = activities().find(item => item.id === id)
+    if (!activity || activity.status === 'cancelling') return
+    cancelledActivities.add(id)
+    setActivities(current => current.map(item => item.id === id ? { ...item, status: 'cancelling' } : item))
+    if (activity.status !== 'queued') void api().SessionCancelOperation(activity.sessionID, id).catch(e => setError(String(e)))
+  }
+
+  function cancelAllActivities() {
+    for (const activity of activities()) cancelActivity(activity.id)
+  }
 
   const loadSavedConnections = async () => {
     try { setSavedConnections(await api().ListSavedConnections() ?? []) }
@@ -473,6 +709,7 @@ export default function App() {
   async function closeSession(id: string) {
     setBusy(true)
     try {
+      for (const activity of activities().filter(item => item.sessionID === id)) cancelActivity(activity.id)
       await api().CloseDatabaseSession(id)
       const remaining = sessions().filter(item => item.id !== id)
       setSessions(remaining); setActiveID(remaining.at(-1)?.id ?? '')
@@ -504,7 +741,7 @@ export default function App() {
   }
 
   return <div class="app-shell">
-    <TitleBar onSettings={() => setAppearanceOpen(true)}/>
+    <TitleBar activities={activities()} onCancel={cancelActivity} onCancelAll={cancelAllActivities} onSettings={openSettings}/>
     <Show when={sessions().length} fallback={<Welcome onOpen={connectFile} onPostgres={newConnection} onDemo={connectDemo} busy={busy()} saved={savedConnections()} onSaved={openSaved} onEdit={editSaved} onRemove={removeSaved}/>}>
       <div class="session-layout" aria-busy={busy()}>
         <Show when={sessions().length > 1}>
@@ -519,7 +756,7 @@ export default function App() {
         </Show>
         <div class="database-panels" inert={blocked()}><For each={sessions()}>{session =>
           <Show when={!session.connectionState} fallback={<ConnectionSkeleton session={session} active={session.id === activeID()} tableSidebar={tableSidebar}/>}>
-            <DatabaseWorkspace status={session} active={session.id === activeID()} blocked={blocked()} tableSidebar={tableSidebar} transferPreferences={sidebarPreferences.transfer()} editingPreferences={sidebarPreferences.editing()} registerWorkspace={handle => { if (handle) workspaces.set(session.id, handle); else workspaces.delete(session.id) }} onNewConnection={newConnection} onCloseSession={() => closeSession(session.id)} onOpenDatabase={database => openDatabase(session.id, database)}/>
+            <DatabaseWorkspace status={session} active={session.id === activeID()} blocked={blocked()} tableSidebar={tableSidebar} transferPreferences={sidebarPreferences.transfer()} editingPreferences={sidebarPreferences.editing()} activity={activityController} registerWorkspace={handle => { if (handle) workspaces.set(session.id, handle); else workspaces.delete(session.id) }} onNewConnection={newConnection} onCloseSession={() => closeSession(session.id)} onOpenDatabase={database => openDatabase(session.id, database)}/>
           </Show>
         }</For></div>
       </div>
@@ -529,7 +766,7 @@ export default function App() {
     <Show when={editingConnection()}>{profile => <SavedConnectionEditModal profile={profile()} busy={busy()} onSave={saveEditedConnection} onClose={() => setEditingConnection(null)}/>}</Show>
     <Show when={failedConnection()}>{session => <ConnectionFailureModal session={session()} onEdit={editFailedConnection} onClose={closeFailedConnection}/>}</Show>
     <Show when={appearanceOpen()}>
-      <AppearanceModal appearance={sidebarPreferences.appearance()} transfer={sidebarPreferences.transfer()} editing={sidebarPreferences.editing()} ready={sidebarPreferences.ready()} onChange={sidebarPreferences.setAppearance} onTransferChange={sidebarPreferences.setTransfer} onEditingChange={sidebarPreferences.setEditing} onClose={() => setAppearanceOpen(false)}/>
+      <AppearanceModal appearance={sidebarPreferences.appearance()} transfer={sidebarPreferences.transfer()} editing={sidebarPreferences.editing()} fonts={systemFonts()} fontsLoading={systemFontsLoading()} ready={sidebarPreferences.ready()} onChange={sidebarPreferences.setAppearance} onTransferChange={sidebarPreferences.setTransfer} onEditingChange={sidebarPreferences.setEditing} onRefreshFonts={() => void loadSystemFonts(true)} onReset={resetSettings} onClose={() => setAppearanceOpen(false)}/>
     </Show>
   </div>
 }
@@ -564,6 +801,7 @@ function DatabaseWorkspace(props: {
   tableSidebar: SidebarSizing
   transferPreferences: TransferPreferences
   editingPreferences: EditingPreferences
+  activity: ActivityController
   registerWorkspace: (handle: WorkspaceHandle | null) => void
   onNewConnection: () => void
   onCloseSession: () => Promise<void>
@@ -592,6 +830,7 @@ function DatabaseWorkspace(props: {
   const [activeScript, setActiveScript] = createSignal('')
   const [openScripts, setOpenScripts] = createSignal<string[]>([])
   const [activePane, setActivePane] = createSignal<'table' | 'script'>('table')
+  const [editorFocusNonce, setEditorFocusNonce] = createSignal(0)
   // Every open script keeps its own text, its last saved copy and its results,
   // so switching tabs preserves all three rather than sharing one editor.
   const [buffers, setBuffers] = createStore<Record<string, ScriptBuffer>>({})
@@ -839,7 +1078,7 @@ function DatabaseWorkspace(props: {
 
   function startRestore() {
     if (status.readOnly) return
-    guardWorkspace('Restore this database?', 'Restoring replaces data in the archived tables. Save or discard local drafts first.', () => {
+    guardWorkspace('Restore this database?', 'Restoring can replace schema and data. Save or discard local drafts first.', () => {
       void openTransferPreview(() => db.ChooseRestoreBackup(), [])
     })
   }
@@ -883,7 +1122,10 @@ function DatabaseWorkspace(props: {
       if (!result.path && (preview.kind === 'backup' || preview.kind === 'export')) return
       setTransferDialog(null)
       const skipped = result.skipped ? ` · ${result.skipped.toLocaleString()} skipped` : ''
-      setOperationNotice(`${preview.kind === 'backup' ? 'Backup' : preview.kind === 'restore' ? 'Restore' : preview.kind === 'export' ? 'Export' : 'Import'} complete · ${result.rows.toLocaleString()} rows${skipped}`)
+      const amount = preview.kind === 'restore' && preview.format === 'sql'
+        ? `${(result.statements ?? preview.statements ?? 0).toLocaleString()} statements`
+        : `${result.rows.toLocaleString()} rows`
+      setOperationNotice(`${preview.kind === 'backup' ? 'Backup' : preview.kind === 'restore' ? 'Restore' : preview.kind === 'export' ? 'Export' : 'Import'} complete · ${amount}${skipped}`)
       if (preview.kind === 'restore') invalidateTransferredTables()
       if (preview.kind === 'import') invalidateTransferredTables(refs)
     } catch (e) { setError(String(e)) }
@@ -895,13 +1137,20 @@ function DatabaseWorkspace(props: {
       title: `Truncate ${refs.length} table${refs.length === 1 ? '' : 's'}?`,
       message: 'This operation cannot be undone. All rows in the selected tables will be removed in one transaction.',
       run: async () => {
+        const activityID = props.activity.enqueue({
+          sessionID: status.id,
+          database: status.database,
+          source: 'database',
+          statement: `TRUNCATE ${refs.map(ref => `${ref.schema}.${ref.name}`).join(', ')}`,
+        })
         setTransferBusy(true)
         try {
-          const affected = await db.TruncateTables(refs)
+          props.activity.start(activityID)
+          const affected = await db.TruncateTables(activityID, refs)
           setConfirmAction(null); invalidateTransferredTables(refs)
           setOperationNotice(`Truncate complete · ${affected.toLocaleString()} ${status.driver === 'SQLite' ? 'rows' : 'tables'} affected`)
-        } catch (e) { setError(String(e)) }
-        finally { setTransferBusy(false) }
+        } catch (e) { if (!props.activity.cancelled(activityID)) setError(String(e)) }
+        finally { props.activity.finish(activityID); setTransferBusy(false) }
       },
     }))
   }
@@ -983,7 +1232,7 @@ function DatabaseWorkspace(props: {
   // A run of ordinary typing collapses into one undo step. A pause, a newline,
   // or an edit that is not a single character - a paste, a completion, a cut -
   // ends the group, which is what makes undo land where a writer expects.
-  function recordEdit(value: string, selection: { start: number; end: number }) {
+  function recordEdit(value: string, selection: EditorSelection) {
     const name = activeScript()
     const buffer = buffers[name]
     if (!buffer || buffer.text === value) return
@@ -1000,7 +1249,14 @@ function DatabaseWorkspace(props: {
     }))
   }
 
-  function stepHistory(from: 'past' | 'future', selection: { start: number; end: number }) {
+  function rememberEditorSelection(selection: EditorSelection) {
+    const name = activeScript()
+    const caret = buffers[name]?.caret
+    if (!caret || (caret.start === selection.start && caret.end === selection.end && caret.direction === selection.direction)) return
+    setBuffers(name, 'caret', current => ({ ...current, ...selection }))
+  }
+
+  function stepHistory(from: 'past' | 'future', selection: EditorSelection) {
     const name = activeScript()
     const buffer = buffers[name]
     if (!buffer?.[from].length) return
@@ -1039,6 +1295,7 @@ function DatabaseWorkspace(props: {
       setOpenScripts(current => current.includes(name) ? current : [...current, name])
       setActiveScript(name)
       setActivePane('script')
+      setEditorFocusNonce(value => value + 1)
     })
   }
 
@@ -1076,8 +1333,7 @@ function DatabaseWorkspace(props: {
     else drop()
   }
 
-  async function saveScript() {
-    const name = activeScript()
+  async function saveScript(name = activeScript()) {
     if (!name) return
     const content = buffers[name]?.text ?? ''
     try {
@@ -1141,8 +1397,8 @@ function DatabaseWorkspace(props: {
   }
 
   // The editor decides what a run covers: the statement at the cursor, or every
-  // statement the selection touches. Each one keeps its own read-only
-  // transaction, so the console stays read-only however many are sent.
+  // statement the selection touches. Scratch queries stay read-only; a saved
+  // script uses the writable statement endpoint when its connection allows it.
   async function executeQuery(statements: string[]) {
     const queries = statements.map(statement => statement.trim()).filter(Boolean)
     if (!queries.length) { setError('There is no statement to run.'); return }
@@ -1165,17 +1421,38 @@ function DatabaseWorkspace(props: {
     if (plan && !windowed) return
     const queries = windowed ? [windowed] : (unwrap(buffer.statements) as string[])
     if (!queries.length) return
+    const activityIDs = queries.map(statement => props.activity.enqueue({
+      sessionID: status.id,
+      database: status.database,
+      source: 'script',
+      statement,
+    }))
     setBuffers(name, 'running', true); setError('')
     try {
       let result: QueryResult | null = null
+      let completed = 0
       for (const [position, statement] of queries.entries()) {
-        try { result = await db.ExecuteQuery(statement) }
-        catch (e) { throw new Error(`statement ${position + 1} of ${queries.length}: ${String(e).replace(/^Error:\s*/i, '')}`) }
+        const activityID = activityIDs[position]
+        if (props.activity.cancelled(activityID)) { props.activity.finish(activityID); continue }
+        props.activity.start(activityID)
+        try {
+          result = name
+            ? await db.ExecuteScriptStatement(activityID, statement)
+            : await db.ExecuteQuery(activityID, statement)
+          completed++
+        }
+        catch (e) {
+          if (props.activity.cancelled(activityID)) continue
+          throw new Error(`statement ${position + 1} of ${queries.length}: ${String(e).replace(/^Error:\s*/i, '')}`)
+        } finally { props.activity.finish(activityID) }
       }
-      if (result && queries.length > 1) result = { ...result, message: `${queries.length} statements · ${result.message}` }
-      if (buffers[name]) batch(() => { setBuffers(name, 'result', result); setBuffers(name, 'page', page) })
+      if (result && completed > 1) result = { ...result, message: `${completed} statements · ${result.message}` }
+      if (result && buffers[name]) batch(() => { setBuffers(name, 'result', result); setBuffers(name, 'page', page) })
     } catch (e) { setError(String(e)) }
-    finally { if (buffers[name]) setBuffers(name, 'running', false) }
+    finally {
+      activityIDs.forEach(props.activity.finish)
+      if (buffers[name]) setBuffers(name, 'running', false)
+    }
   }
 
   const historyLimit = () => props.editingPreferences.undoHistoryLimit
@@ -1293,15 +1570,22 @@ function DatabaseWorkspace(props: {
     const state = tabStates[key]
     if (!item || !state || !operations.length) return
     if (saving) throw new Error('A save is already in progress.')
+    const activityID = props.activity.enqueue({
+      sessionID: status.id,
+      database: status.database,
+      source: 'database',
+      statement: `APPLY ${operations.length} CHANGE${operations.length === 1 ? '' : 'S'} TO ${item.schema}.${item.name}`,
+    })
     saving = true
     updateTabState(key, current => ({ ...current, loading: true })); setError('')
     try {
-      await db.ApplyChanges(item.schema, item.name, operations.map(({ id: _id, ...operation }) => operation))
+      props.activity.start(activityID)
+      await db.ApplyChanges(activityID, item.schema, item.name, operations.map(({ id: _id, ...operation }) => operation))
       clearDraft(key)
       await loadTables()
       updateTabState(key, current => ({ ...current, selectedRows: new Set(), loadedRequest: '', loadError: '' }))
-    } catch (e) { setError(String(e)); throw e }
-    finally { saving = false; updateTabState(key, current => ({ ...current, loading: false })) }
+    } catch (e) { if (!props.activity.cancelled(activityID)) setError(String(e)); throw e }
+    finally { props.activity.finish(activityID); saving = false; updateTabState(key, current => ({ ...current, loading: false })) }
   }
 
   function discardChanges(key: string) {
@@ -1445,8 +1729,9 @@ function DatabaseWorkspace(props: {
             const current = () => activePane() === 'script' && activeScript() === name
             return <button data-active={current()} title={label()} class={`tab script-tab ${current() ? 'active' : ''} ${scriptDirty(name) ? 'changed' : ''}`} onClick={() => showScript(name)}>
               <Code size={13}/><b class="tab-label">{label()}</b>
-              <Show when={scriptDirty(name)}><i class="tab-change-dot" title="Unsaved changes"/></Show>
-              <span onClick={event => { event.stopPropagation(); closeScript(name) }}><X size={13}/></span>
+              <span class={`tab-close ${scriptDirty(name) ? 'dirty' : ''}`} title={scriptDirty(name) ? 'Close and review unsaved changes' : 'Close script'} onClick={event => { event.stopPropagation(); closeScript(name) }}>
+                <Show when={scriptDirty(name)} fallback={<X size={13}/>}><i class="tab-change-dot"/></Show>
+              </span>
             </button>
           }}</For></TabStrip>
           <button class={`query-tab ${activePane() === 'script' && !activeScript() ? 'active' : ''}`} title="Scratch SQL" onClick={openScratch}><Code size={15}/> SQL</button>
@@ -1501,8 +1786,10 @@ function DatabaseWorkspace(props: {
         <Show when={activePane() === 'script' && buffers[activeScript()]}>
           <ScriptPanel
             name={activeScript()}
+            driver={status.driver}
             text={editorText()}
             dirty={scriptDirty()}
+            readOnly={!activeScript() || status.readOnly}
             result={buffers[activeScript()]?.result ?? null}
             running={buffers[activeScript()]?.running ?? false}
             page={buffers[activeScript()]?.page ?? 0}
@@ -1511,7 +1798,9 @@ function DatabaseWorkspace(props: {
             tables={completionTables()}
             onNeedColumns={name => void loadColumnsFor(name)}
             caret={buffers[activeScript()]!.caret}
+            focusNonce={editorFocusNonce()}
             onInput={recordEdit}
+            onSelectionChange={rememberEditorSelection}
             onUndo={selection => stepHistory('past', selection)}
             onRedo={selection => stepHistory('future', selection)}
             onRun={executeQuery}
@@ -1529,7 +1818,7 @@ function DatabaseWorkspace(props: {
       <UnsavedModal title={action().title} message={action().message} count={guardedKeys().reduce((count, key) => count + draftOperations(key).length, 0)} onCancel={() => setGuardedAction(null)} onDiscard={async () => { const current = action(); const keys = guardedKeys(); keys.forEach(discardChanges); setGuardedAction(null); await current.run() }} onSave={async () => { const current = action(); const keys = guardedKeys(); try { for (const key of keys) await saveChanges(key); setGuardedAction(null); await current.run() } catch { /* Keep dialog open when save fails. */ } }}/>
     }</Show>
     <Show when={scriptGuard()}>{guard =>
-      <UnsavedModal title="Unsaved script" message={`${guard().name.replace(/\.sql$/i, '')} has changes that have not been saved.`} count={1} onCancel={() => setScriptGuard(null)} onDiscard={async () => { const action = guard(); setScriptGuard(null); await action.run() }} onSave={async () => { const action = guard(); try { await saveScript(); setScriptGuard(null); await action.run() } catch { /* Keep the dialog open when the save fails. */ } }}/>
+      <UnsavedModal title="Unsaved script" message={`${guard().name.replace(/\.sql$/i, '')} has changes that have not been saved.`} count={1} onCancel={() => setScriptGuard(null)} onDiscard={async () => { const action = guard(); setScriptGuard(null); await action.run() }} onSave={async () => { const action = guard(); try { await saveScript(action.name); setScriptGuard(null); await action.run() } catch { /* Keep the dialog open when the save fails. */ } }}/>
     }</Show>
     <Show when={transferDialog()}>{dialog =>
       <TransferModal state={dialog()} busy={transferBusy()} onChange={setTransferDialog} onClose={() => setTransferDialog(null)} onRun={() => void runTransfer()}/>
@@ -1636,7 +1925,7 @@ function SchemaView(props: { schema: ColumnInfo[]; indexes: IndexInfo[]; error: 
   </div>
 }
 
-type EditSnapshot = { text: string; start: number; end: number }
+type EditSnapshot = EditorSelection & { text: string }
 
 type ScriptBuffer = {
   text: string
@@ -1648,7 +1937,7 @@ type ScriptBuffer = {
   /** When the last edit landed, used to group a run of typing into one step. */
   editedAt: number
   /** A bumped nonce tells the editor to restore this caret. */
-  caret: { start: number; end: number; nonce: number }
+  caret: EditorSelection & { nonce: number }
   /** What the last run covered, so a page can re-run it. */
   statements: string[]
   /** Null when the query cannot be paged without changing its meaning. */
@@ -1657,7 +1946,7 @@ type ScriptBuffer = {
 }
 
 const newScriptBuffer = (text: string): ScriptBuffer =>
-  ({ text, saved: text, result: null, running: false, past: [], future: [], editedAt: 0, caret: { start: 0, end: 0, nonce: 0 }, statements: [], plan: null, page: 0 })
+  ({ text, saved: text, result: null, running: false, past: [], future: [], editedAt: 0, caret: { start: 0, end: 0, direction: 'none', nonce: 0 }, statements: [], plan: null, page: 0 })
 
 /**
  * ScriptPanel is the whole editing surface for one script: its own header with
@@ -1667,8 +1956,10 @@ const newScriptBuffer = (text: string): ScriptBuffer =>
  */
 function ScriptPanel(props: {
   name: string
+  driver: string
   text: string
   dirty: boolean
+  readOnly: boolean
   result: QueryResult | null
   running: boolean
   page: number
@@ -1676,10 +1967,12 @@ function ScriptPanel(props: {
   onPage: (page: number) => void
   tables: CompletionTable[]
   onNeedColumns: (table: string) => void
-  caret: { start: number; end: number; nonce: number }
-  onInput: (value: string, selection: { start: number; end: number }) => void
-  onUndo: (selection: { start: number; end: number }) => void
-  onRedo: (selection: { start: number; end: number }) => void
+  caret: EditorSelection & { nonce: number }
+  focusNonce: number
+  onInput: (value: string, selection: EditorSelection) => void
+  onSelectionChange: (selection: EditorSelection) => void
+  onUndo: (selection: EditorSelection) => void
+  onRedo: (selection: EditorSelection) => void
   onRun: (statements: string[]) => void
   onSave: () => void
   onClose: () => void
@@ -1691,7 +1984,7 @@ function ScriptPanel(props: {
 
   return <div class="script-panel">
     <header class="script-panel-head">
-      <div class="script-title"><Code size={15}/><b>{label()}</b><Show when={props.dirty}><i class="script-dirty" title="Unsaved changes"/></Show><span>Read-only</span></div>
+      <div class="script-title"><Code size={15}/><b>{label()}</b><Show when={props.dirty}><i class="script-dirty" title="Unsaved changes"/></Show><span class={props.readOnly ? 'read-only' : 'writable'} title={props.readOnly ? 'Scratch queries and read-only connections cannot change data' : 'Saved scripts can change this database'}>{props.readOnly ? 'Read-only' : 'Write enabled'}</span></div>
       <div class="script-panel-actions">
         <Show when={props.name}><button class="secondary" disabled={!props.dirty} onClick={props.onSave}><Save size={14}/> Save<kbd>Ctrl S</kbd></button></Show>
         <button class="primary" disabled={props.running || !runList().length} onClick={run}><Play size={14}/> {runLabel()}<kbd>⌘ ↵</kbd></button>
@@ -1699,7 +1992,9 @@ function ScriptPanel(props: {
       </div>
     </header>
     <div class="script-body">
-      <SqlEditor value={props.text} running={props.running} tables={props.tables} caret={props.caret} onNeedColumns={props.onNeedColumns} onInput={props.onInput} onUndo={props.onUndo} onRedo={props.onRedo} onRun={props.onRun} onRunListChange={setRunList} onSave={props.name ? props.onSave : undefined}/>
+      <Suspense fallback={<div class="editor-wrap sql-editor-loading" role="status" aria-label="Loading SQL editor"><i/><i/><i/></div>}>
+        <SqlEditor value={props.text} driver={props.driver} running={props.running} tables={props.tables} caret={props.caret} focusNonce={props.focusNonce} onNeedColumns={props.onNeedColumns} onInput={props.onInput} onSelectionChange={props.onSelectionChange} onUndo={props.onUndo} onRedo={props.onRedo} onRun={props.onRun} onRunListChange={setRunList} onSave={props.name ? props.onSave : undefined}/>
+      </Suspense>
       <Show when={props.result} fallback={<section class="script-results empty"><div class="result-placeholder"><Play size={20}/><span>Run a statement to see its rows</span></div></section>}>{result =>
         <section class="script-results">
           <div class="result-meta"><Check size={13}/>{result().message}<span>{result().durationMs} ms</span></div>
@@ -1736,6 +2031,7 @@ function TransferModal(props: {
   const preview = () => props.state.preview
   const first = () => preview().tables[0]
   const incompatible = () => preview().kind === 'import' && Boolean(first()?.extraColumns?.length || first()?.requiredMissing?.length)
+  const noWork = () => preview().kind === 'restore' && preview().format === 'sql' ? !preview().statements : !preview().tables.length
   const title = () => { const kind = preview().kind; return kind === 'backup' ? 'Back up database' : kind === 'restore' ? 'Restore database' : kind === 'export' ? `Export ${preview().tables.length === 1 ? 'table' : 'tables'}` : 'Import table' }
   const action = () => { const kind = preview().kind; return kind === 'backup' ? 'Choose location & back up' : kind === 'restore' ? 'Restore database' : kind === 'export' ? 'Choose location & export' : 'Import data' }
 
@@ -1750,7 +2046,10 @@ function TransferModal(props: {
       <header><div class={`modal-mark ${preview().kind === 'restore' || preview().kind === 'import' ? 'warning' : ''}`}>{preview().kind === 'backup' ? <Save size={18}/> : preview().kind === 'restore' ? <Refresh size={18}/> : preview().kind === 'export' ? <File size={18}/> : <Plus size={18}/>}</div><div><h3 id="transfer-title">{title()}</h3><p>{preview().database} · {preview().driver}</p></div><button class="icon-button" disabled={props.busy} onClick={props.onClose} aria-label="Close transfer preview"><X size={16}/></button></header>
       <div class="transfer-content">
         <Show when={preview().path}><div class="transfer-path"><File size={14}/><span title={preview().path}>{preview().path}</span></div></Show>
-        <div class="transfer-summary"><span><b>{preview().tables.length.toLocaleString()}</b> tables</span><span><b>{preview().tables.reduce((total, table) => total + table.rows, 0).toLocaleString()}</b> rows</span><Show when={preview().format}><span><b>{preview().format.toUpperCase()}</b> format</span></Show></div>
+        <div class="transfer-summary">
+          <Show when={preview().format === 'sql'} fallback={<><span><b>{preview().tables.length.toLocaleString()}</b> tables</span><span><b>{preview().tables.reduce((total, table) => total + table.rows, 0).toLocaleString()}</b> rows</span></>}><span><b>{(preview().statements ?? 0).toLocaleString()}</b> statements</span></Show>
+          <Show when={preview().format}><span><b>{preview().format.toUpperCase()}</b> format</span></Show>
+        </div>
         <Show when={preview().skipped?.length}>
           <section class="transfer-skipped" role="alert">
             <header><Alert size={14}/><b>{preview().skipped!.length} {preview().skipped!.length === 1 ? 'object is' : 'objects are'} not included in this backup</b></header>
@@ -1758,16 +2057,16 @@ function TransferModal(props: {
           </section>
         </Show>
         <Show when={preview().kind === 'backup'}><div class="transfer-note"><Alert size={14}/><span>Data streams into a <code>.pqnb</code> pending file with checkpoints. It becomes <code>.qnb</code> only after a complete, durable write.</span></div></Show>
-        <Show when={preview().kind === 'restore'}><div class="transfer-note danger"><Alert size={14}/><span>Rows in the archived tables will be replaced. This operation runs in one transaction and cannot be undone.</span></div></Show>
+        <Show when={preview().kind === 'restore'}><div class="transfer-note danger"><Alert size={14}/><span>{preview().format === 'sql' ? `This SQL dump will execute ${(preview().statements ?? 0).toLocaleString()} statements against the current database.` : 'Rows and schema objects in the archived tables will be replaced.'} The restore runs in one transaction and cannot be undone after it commits.</span></div></Show>
         <Show when={preview().kind === 'export'}><section class="transfer-options"><b>Export format</b><div><button class={props.state.format === 'csv' ? 'active' : ''} disabled={preview().tables.length > 1} onClick={() => props.onChange({ ...props.state, format: 'csv' })}>CSV</button><button class={props.state.format === 'json' ? 'active' : ''} onClick={() => props.onChange({ ...props.state, format: 'json' })}>JSON</button></div><Show when={preview().tables.length > 1}><small>Multiple tables are exported as one JSON bundle.</small></Show></section></Show>
         <Show when={preview().kind === 'import'}><section class="transfer-options"><b>When a key conflicts</b><div><button class={props.state.conflict === 'abort' ? 'active' : ''} onClick={() => props.onChange({ ...props.state, conflict: 'abort' })}>Abort import</button><button class={props.state.conflict === 'skip' ? 'active' : ''} onClick={() => props.onChange({ ...props.state, conflict: 'skip' })}>Skip row</button></div></section></Show>
-        <section class="transfer-tables"><header><b>Column preview</b><span>{preview().tables.length > 100 ? `First 100 of ${preview().tables.length.toLocaleString()}` : `${preview().tables.length} table${preview().tables.length === 1 ? '' : 's'}`}</span></header>
+        <Show when={preview().format !== 'sql'}><section class="transfer-tables"><header><b>Column preview</b><span>{preview().tables.length > 100 ? `First 100 of ${preview().tables.length.toLocaleString()}` : `${preview().tables.length} table${preview().tables.length === 1 ? '' : 's'}`}</span></header>
           <For each={preview().tables.slice(0, 100)}>{table => <div class="transfer-table"><div><Table size={14}/><b>{table.schema}.{table.name}</b><span>{table.rows.toLocaleString()} rows</span></div><div class="transfer-columns"><For each={table.columns}>{column => <code class={table.extraColumns?.includes(column) ? 'extra' : ''}>{column}</code>}</For></div><Show when={table.missingColumns?.length}><small class={table.requiredMissing?.length ? 'invalid' : ''}>Missing target columns: {table.missingColumns.join(', ')}</small></Show></div>}</For>
-        </section>
+        </section></Show>
         <Show when={first()?.sampleRows?.length}><div class="transfer-sample"><table><thead><tr><For each={first().columns}>{column => <th>{column}</th>}</For></tr></thead><tbody><For each={first().sampleRows}>{row => <tr><Index each={first().columns}>{(_column, columnIndex) => <td>{String((row as unknown[])[columnIndex] ?? 'NULL')}</td>}</Index></tr>}</For></tbody></table></div></Show>
         <Show when={incompatible()}><div class="transfer-validation" role="alert"><Alert size={14}/><span>Fix the source columns before importing. Extra columns and missing required columns cannot be imported safely.</span></div></Show>
       </div>
-      <footer><button class="secondary" disabled={props.busy} onClick={props.onClose}>Cancel</button><button class={`primary ${preview().kind === 'restore' ? 'danger-primary' : ''}`} disabled={props.busy || incompatible() || !preview().tables.length} onClick={props.onRun}><Show when={props.busy}><Refresh size={14} class="spin"/></Show>{props.busy ? 'Working…' : action()}</button></footer>
+      <footer><button class="secondary" disabled={props.busy} onClick={props.onClose}>Cancel</button><button class={`primary ${preview().kind === 'restore' ? 'danger-primary' : ''}`} disabled={props.busy || incompatible() || noWork()} onClick={props.onRun}><Show when={props.busy}><Refresh size={14} class="spin"/></Show>{props.busy ? 'Working…' : action()}</button></footer>
     </section>
   </div>
 }
@@ -1793,7 +2092,11 @@ function UnsavedModal(props: { title: string; message: string; count: number; on
       <h3>{props.title}</h3>
       <p>{props.message}</p>
       <div class="pending-summary"><span>{props.count}</span> pending change{props.count === 1 ? '' : 's'}</div>
-      <footer><button class="secondary" disabled={busy()} onClick={props.onCancel}>Cancel</button><button class="discard-button" disabled={busy()} onClick={() => void run(props.onDiscard)}>Discard changes</button><button class="primary" disabled={busy()} onClick={() => void run(props.onSave)}><Save size={14}/> Save & continue</button></footer>
+      <footer class="unsaved-actions">
+        <button class="secondary" disabled={busy()} onClick={props.onCancel}>Cancel</button>
+        <button class="discard-button" disabled={busy()} onClick={() => void run(props.onDiscard)}>Discard</button>
+        <button class="primary" disabled={busy()} onClick={() => void run(props.onSave)}><Save size={14}/> Save</button>
+      </footer>
     </section>
   </div>
 }

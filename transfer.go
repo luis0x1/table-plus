@@ -57,20 +57,22 @@ type TransferSkippedTable struct {
 }
 
 type TransferPreview struct {
-	Kind     string                 `json:"kind"`
-	Path     string                 `json:"path"`
-	Format   string                 `json:"format"`
-	Driver   string                 `json:"driver"`
-	Database string                 `json:"database"`
-	Tables   []TransferTablePreview `json:"tables"`
-	Skipped  []TransferSkippedTable `json:"skipped,omitempty"`
+	Kind       string                 `json:"kind"`
+	Path       string                 `json:"path"`
+	Format     string                 `json:"format"`
+	Driver     string                 `json:"driver"`
+	Database   string                 `json:"database"`
+	Tables     []TransferTablePreview `json:"tables"`
+	Skipped    []TransferSkippedTable `json:"skipped,omitempty"`
+	Statements int                    `json:"statements,omitempty"`
 }
 
 type TransferResult struct {
-	Path    string `json:"path"`
-	Tables  int    `json:"tables"`
-	Rows    int64  `json:"rows"`
-	Skipped int64  `json:"skipped"`
+	Path       string `json:"path"`
+	Tables     int    `json:"tables"`
+	Rows       int64  `json:"rows"`
+	Skipped    int64  `json:"skipped"`
+	Statements int    `json:"statements,omitempty"`
 }
 
 type backupValue struct {
@@ -445,12 +447,23 @@ func decodeBackupValue(value backupValue) (any, error) {
 }
 
 func (a *App) ChooseRestoreBackup() (TransferPreview, error) {
-	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{Title: "Restore QueryNest backup", Filters: []runtime.FileFilter{{DisplayName: "Completed QueryNest backup (*.qnb)", Pattern: "*.qnb"}}})
+	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{Title: "Restore database", Filters: []runtime.FileFilter{
+		{DisplayName: "Database backup (*.qnb;*.sql)", Pattern: "*.qnb;*.sql"},
+		{DisplayName: "SQL dump (*.sql)", Pattern: "*.sql"},
+		{DisplayName: "QueryNest backup (*.qnb)", Pattern: "*.qnb"},
+	}})
 	if err != nil || path == "" {
 		return TransferPreview{}, err
 	}
 	if strings.EqualFold(filepath.Ext(path), ".pqnb") {
 		return TransferPreview{}, errors.New("pending .pqnb backups are incomplete and cannot be restored")
+	}
+	if strings.EqualFold(filepath.Ext(path), ".sql") {
+		status := a.GetStatus()
+		return previewSQLRestore(path, status.Driver, status.Database)
+	}
+	if !strings.EqualFold(filepath.Ext(path), ".qnb") {
+		return TransferPreview{}, errors.New("restore supports completed .qnb backups and .sql dumps")
 	}
 	manifest, _, err := readBackupManifest(path)
 	if err != nil {
@@ -514,6 +527,12 @@ func backupDecoder(reader io.ReadCloser) *json.Decoder {
 }
 
 func (a *App) RestoreDatabase(path string) (TransferResult, error) {
+	if strings.EqualFold(filepath.Ext(path), ".sql") {
+		return a.restoreSQLDatabase(path)
+	}
+	if !strings.EqualFold(filepath.Ext(path), ".qnb") {
+		return TransferResult{}, errors.New("restore supports completed .qnb backups and .sql dumps")
+	}
 	db, driver, readOnly, err := a.editableConnection()
 	if err != nil {
 		return TransferResult{}, err
@@ -1394,6 +1413,16 @@ func (a *App) importCSVTable(db *sql.DB, driver string, table TableRef, path, co
 }
 
 func (a *App) TruncateTables(tables []TableRef) (int64, error) {
+	return a.truncateTables(context.Background(), tables)
+}
+
+func (a *App) TruncateTablesTracked(operationID string, tables []TableRef) (int64, error) {
+	ctx, finish := a.beginOperation(operationID)
+	defer finish()
+	return a.truncateTables(ctx, tables)
+}
+
+func (a *App) truncateTables(ctx context.Context, tables []TableRef) (int64, error) {
 	db, driver, readOnly, err := a.editableConnection()
 	if err != nil {
 		return 0, err
@@ -1409,7 +1438,7 @@ func (a *App) TruncateTables(tables []TableRef) (int64, error) {
 			return 0, err
 		}
 	}
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -1418,7 +1447,7 @@ func (a *App) TruncateTables(tables []TableRef) (int64, error) {
 		for i, table := range tables {
 			names[i] = qualifiedIdentifier(table.Schema, table.Name)
 		}
-		if _, err := tx.Exec(`TRUNCATE TABLE ` + strings.Join(names, ", ")); err != nil {
+		if _, err := tx.ExecContext(ctx, `TRUNCATE TABLE `+strings.Join(names, ", ")); err != nil {
 			_ = tx.Rollback()
 			return 0, err
 		}
@@ -1429,7 +1458,7 @@ func (a *App) TruncateTables(tables []TableRef) (int64, error) {
 	}
 	var affected int64
 	for i := len(tables) - 1; i >= 0; i-- {
-		result, err := tx.Exec(`DELETE FROM ` + qualifiedIdentifier(tables[i].Schema, tables[i].Name))
+		result, err := tx.ExecContext(ctx, `DELETE FROM `+qualifiedIdentifier(tables[i].Schema, tables[i].Name))
 		if err != nil {
 			_ = tx.Rollback()
 			return 0, err

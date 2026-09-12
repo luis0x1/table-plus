@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -145,6 +146,51 @@ func (a *App) ListDatabases(id string) ([]string, error) {
 	return result, rows.Err()
 }
 
+func normalizeDatabaseName(value string) (string, error) {
+	name := strings.TrimSpace(value)
+	if name == "" {
+		return "", errors.New("database name is required")
+	}
+	if len([]byte(name)) > 63 {
+		return "", errors.New("database name must be at most 63 bytes")
+	}
+	if strings.ContainsAny(name, "\x00\r\n") {
+		return "", errors.New("database name cannot contain control characters")
+	}
+	return name, nil
+}
+
+// CreateDatabase creates a PostgreSQL database from the currently selected
+// server connection. SQLite databases are files and continue to use the normal
+// open-file flow instead of pretending they live in this server picker.
+func (a *App) CreateDatabase(id, value string) error {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return err
+	}
+	status := child.GetStatus()
+	if status.Driver != driverPostgres {
+		return errors.New("create another SQLite database by opening or creating a database file")
+	}
+	if status.ReadOnly {
+		return errors.New("this connection is read-only; reconnect with editing enabled")
+	}
+	name, err := normalizeDatabaseName(value)
+	if err != nil {
+		return err
+	}
+	db, _, err := child.connection()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := db.ExecContext(ctx, `CREATE DATABASE `+quoteIdentifier(name)); err != nil {
+		return fmt.Errorf("create database %s: %w", name, err)
+	}
+	return nil
+}
+
 func (a *App) OpenDatabase(id, database string) (ConnectionStatus, error) {
 	child, err := a.databaseSession(id)
 	if err != nil {
@@ -220,12 +266,52 @@ func (a *App) SessionExecuteQuery(id, query string) (QueryResult, error) {
 	return child.ExecuteQuery(query)
 }
 
+func (a *App) SessionExecuteQueryTracked(id, operationID, query string) (QueryResult, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	return child.ExecuteQueryTracked(operationID, query)
+}
+
+func (a *App) SessionExecuteScriptStatement(id, query string) (QueryResult, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	return child.ExecuteScriptStatement(query)
+}
+
+func (a *App) SessionExecuteScriptStatementTracked(id, operationID, query string) (QueryResult, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	return child.ExecuteScriptStatementTracked(operationID, query)
+}
+
+func (a *App) SessionCancelOperation(id, operationID string) (bool, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return false, err
+	}
+	return child.CancelOperation(operationID), nil
+}
+
 func (a *App) SessionApplyChanges(id, schema, table string, operations []RowOperation) (int64, error) {
 	child, err := a.databaseSession(id)
 	if err != nil {
 		return 0, err
 	}
 	return child.ApplyChanges(schema, table, operations)
+}
+
+func (a *App) SessionApplyChangesTracked(id, operationID, schema, table string, operations []RowOperation) (int64, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return 0, err
+	}
+	return child.ApplyChangesTracked(operationID, schema, table, operations)
 }
 
 func (a *App) SessionPreviewDatabaseBackup(id string) (TransferPreview, error) {
@@ -298,6 +384,14 @@ func (a *App) SessionTruncateTables(id string, tables []TableRef) (int64, error)
 		return 0, err
 	}
 	return child.TruncateTables(tables)
+}
+
+func (a *App) SessionTruncateTablesTracked(id, operationID string, tables []TableRef) (int64, error) {
+	child, err := a.databaseSession(id)
+	if err != nil {
+		return 0, err
+	}
+	return child.TruncateTablesTracked(operationID, tables)
 }
 
 func (a *App) SessionScriptWorkspacePath(id string) (string, error) {

@@ -19,6 +19,7 @@ import KeyboardArrowLeft from 'virtual:material-symbol/keyboard-arrow-left'
 import KeyboardArrowRight from 'virtual:material-symbol/keyboard-arrow-right'
 import LeftPanelOpen from 'virtual:material-symbol/left-panel-open'
 import MoreHoriz from 'virtual:material-symbol/more-horiz'
+import PendingActions from 'virtual:material-symbol/pending-actions'
 import PlayArrow from 'virtual:material-symbol/play-arrow'
 import MaterialRedo from 'virtual:material-symbol/redo'
 import MaterialRefresh from 'virtual:material-symbol/refresh'
@@ -64,6 +65,7 @@ export const ChevronDown = icon('keyboard-arrow-down', KeyboardArrowDown)
 export const ChevronLeft = icon('keyboard-arrow-left', KeyboardArrowLeft)
 export const ChevronRight = icon('keyboard-arrow-right', KeyboardArrowRight)
 export const More = icon('more-horiz', MoreHoriz)
+export const Pending = icon('pending-actions', PendingActions)
 export const Play = icon('play-arrow', PlayArrow)
 export const Refresh = icon('refresh', MaterialRefresh)
 export const Columns = icon('view-column', ViewColumn)

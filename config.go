@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Scales keep sidebar sizes proportional to the compact/regular window layout.
@@ -25,7 +26,10 @@ type TransferPreferences struct {
 }
 
 type EditingPreferences struct {
-	UndoHistoryLimit int `json:"undoHistoryLimit"`
+	UndoHistoryLimit int    `json:"undoHistoryLimit"`
+	CaretWidth       int    `json:"caretWidth"`
+	EditorFontSize   int    `json:"editorFontSize"`
+	EditorFontFamily string `json:"editorFontFamily"`
 }
 
 type AppConfig struct {
@@ -42,7 +46,7 @@ func defaultAppConfig() AppConfig {
 		Sidebars:   SidebarPreferences{Databases: 1, Tables: 1},
 		Appearance: AppearancePreferences{FontSize: 17, FontFamily: "system"},
 		Transfer:   TransferPreferences{BackupBatchSizeMB: 500},
-		Editing:    EditingPreferences{UndoHistoryLimit: 100},
+		Editing:    EditingPreferences{UndoHistoryLimit: 100, CaretWidth: 2, EditorFontSize: 12, EditorFontFamily: "mono"},
 	}
 }
 
@@ -65,15 +69,15 @@ func validSidebarPreferences(p SidebarPreferences) bool {
 }
 
 func validAppearancePreferences(p AppearancePreferences) bool {
-	if p.FontSize < 14 || p.FontSize > 20 {
+	return p.FontSize >= 14 && p.FontSize <= 20 && validFontFamily(p.FontFamily)
+}
+
+func validFontFamily(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 128 {
 		return false
 	}
-	switch p.FontFamily {
-	case "system", "humanist", "serif", "mono":
-		return true
-	default:
-		return false
-	}
+	return !strings.ContainsAny(value, "\x00\r\n")
 }
 
 func validTransferPreferences(p TransferPreferences) bool {
@@ -81,7 +85,10 @@ func validTransferPreferences(p TransferPreferences) bool {
 }
 
 func validEditingPreferences(p EditingPreferences) bool {
-	return p.UndoHistoryLimit >= 10 && p.UndoHistoryLimit <= 1000
+	return p.UndoHistoryLimit >= 10 && p.UndoHistoryLimit <= 1000 &&
+		p.CaretWidth >= 1 && p.CaretWidth <= 4 &&
+		p.EditorFontSize >= 10 && p.EditorFontSize <= 24 &&
+		validFontFamily(p.EditorFontFamily)
 }
 
 // LoadAppConfig migrates the legacy file or browser preferences when the new
@@ -155,7 +162,7 @@ func (a *App) SaveSidebarPreferences(preferences SidebarPreferences) error {
 
 func (a *App) SaveAppearancePreferences(preferences AppearancePreferences) error {
 	if !validAppearancePreferences(preferences) {
-		return errors.New("font size must be between 14 and 20 and font family must be supported")
+		return errors.New("font size must be between 14 and 20 and font family must be a valid installed font name")
 	}
 	a.configMu.Lock()
 	defer a.configMu.Unlock()
@@ -191,7 +198,7 @@ func (a *App) SaveTransferPreferences(preferences TransferPreferences) error {
 
 func (a *App) SaveEditingPreferences(preferences EditingPreferences) error {
 	if !validEditingPreferences(preferences) {
-		return errors.New("undo history limit must be between 10 and 1000 changes")
+		return errors.New("invalid editor settings")
 	}
 	a.configMu.Lock()
 	defer a.configMu.Unlock()
@@ -287,6 +294,9 @@ func writeAppConfig(path string, config AppConfig, fields map[string]json.RawMes
 		}
 	}
 	editing["undoHistoryLimit"], _ = json.Marshal(config.Editing.UndoHistoryLimit)
+	editing["caretWidth"], _ = json.Marshal(config.Editing.CaretWidth)
+	editing["editorFontSize"], _ = json.Marshal(config.Editing.EditorFontSize)
+	editing["editorFontFamily"], _ = json.Marshal(config.Editing.EditorFontFamily)
 	fields["editing"], _ = json.Marshal(editing)
 	fields["version"], _ = json.Marshal(config.Version)
 	data, err := json.MarshalIndent(fields, "", "  ")

@@ -52,6 +52,7 @@ export interface TransferPreview {
   database: string
   tables: TransferTablePreview[]
   skipped?: TransferSkippedTable[]
+  statements?: number
 }
 
 export interface TransferResult {
@@ -59,6 +60,7 @@ export interface TransferResult {
   tables: number
   rows: number
   skipped: number
+  statements?: number
 }
 
 export interface PostgresConfig {
@@ -147,7 +149,7 @@ export interface SidebarPreferences {
   tables: number
 }
 
-export type FontFamily = 'system' | 'humanist' | 'serif' | 'mono'
+export type FontFamily = string
 
 export interface AppearancePreferences {
   fontSize: number
@@ -160,6 +162,9 @@ export interface TransferPreferences {
 
 export interface EditingPreferences {
   undoHistoryLimit: number
+  caretWidth: number
+  editorFontSize: number
+  editorFontFamily: string
 }
 
 export interface AppConfig {

@@ -1,10 +1,98 @@
 package main
 
 import (
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestSQLRestoreScannerKeepsBodiesAndQuotedSemicolonsTogether(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "boundaries.sql")
+	content := "\ufeff" + `-- leading comment with ;
+CREATE TABLE notes (value TEXT);
+INSERT INTO notes VALUES ('one;two');
+CREATE TRIGGER notes_audit AFTER INSERT ON notes BEGIN
+  INSERT INTO notes VALUES (CASE WHEN NEW.value = 'x' THEN 'a;b' ELSE 'c' END);
+END;
+CREATE FUNCTION touch_note() RETURNS trigger LANGUAGE plpgsql AS $body$
+BEGIN
+  PERFORM 1;
+  RETURN NEW;
+END
+$body$;`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scanner, err := openRestoreSQLScanner(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scanner.Close()
+	statements := make([]string, 0)
+	for {
+		statement, err := scanner.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		statements = append(statements, statement)
+	}
+	if len(statements) != 4 {
+		t.Fatalf("split SQL dump into %d statements: %#v", len(statements), statements)
+	}
+	if !strings.Contains(statements[2], "CASE WHEN") || !strings.Contains(statements[3], "PERFORM 1;") {
+		t.Fatalf("trigger or dollar-quoted body was split: %#v", statements)
+	}
+}
+
+func TestRestoreSQLDumpIsAtomic(t *testing.T) {
+	app := openTestApp(t)
+	path := filepath.Join(t.TempDir(), "restore.sql")
+	content := `PRAGMA foreign_keys = ON;
+BEGIN TRANSACTION;
+CREATE TABLE restored_notes (id INTEGER PRIMARY KEY, value TEXT);
+CREATE TABLE restored_audit (value TEXT);
+CREATE TRIGGER restored_notes_audit AFTER INSERT ON restored_notes BEGIN
+  INSERT INTO restored_audit VALUES ('created;' || NEW.value);
+END;
+INSERT INTO restored_notes VALUES (1, 'from SQL');
+COMMIT;`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := previewSQLRestore(path, driverSQLite, "test")
+	if err != nil || preview.Format != "sql" || preview.Statements != 5 {
+		t.Fatalf("unexpected SQL preview: %#v, %v", preview, err)
+	}
+	result, err := app.RestoreDatabase(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Statements != preview.Statements {
+		t.Fatalf("preview counted %d statements but restore ran %d", preview.Statements, result.Statements)
+	}
+	var value string
+	if err := app.db.QueryRow(`SELECT value FROM restored_audit`).Scan(&value); err != nil || value != "created;from SQL" {
+		t.Fatalf("SQL restore did not preserve trigger body: %q, %v", value, err)
+	}
+
+	broken := filepath.Join(t.TempDir(), "broken.sql")
+	if err := os.WriteFile(broken, []byte(`CREATE TABLE rolled_back (id INTEGER); INSERT INTO missing_table VALUES (1);`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.RestoreDatabase(broken); err == nil {
+		t.Fatal("invalid SQL restore unexpectedly succeeded")
+	}
+	var count int
+	if err := app.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'rolled_back'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("failed SQL restore was not rolled back: count=%d, %v", count, err)
+	}
+}
 
 func TestStreamingBackupRestoreAndPendingRename(t *testing.T) {
 	app := openTestApp(t)

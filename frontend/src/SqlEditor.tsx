@@ -1,14 +1,27 @@
-import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show, type JSX } from 'solid-js'
-import { completionContext, scanSql, sqlCompletions, statementsInRange, summarizeStatement, tableAliases, type Completion, type CompletionTable, type SqlStatement, type SqlToken } from './sql'
+import { autocompletion, closeBrackets, closeBracketsKeymap, closeCompletion, completionKeymap, completionStatus, startCompletion, type CompletionResult, type CompletionSource } from '@codemirror/autocomplete'
+import { defaultKeymap, indentWithTab } from '@codemirror/commands'
+import { PostgreSQL, SQLite, keywordCompletionSource, sql } from '@codemirror/lang-sql'
+import { bracketMatching, foldGutter, foldKeymap, HighlightStyle, indentOnInput, syntaxHighlighting } from '@codemirror/language'
+import { highlightSelectionMatches, searchKeymap } from '@codemirror/search'
+import { EditorSelection as CodeMirrorSelection, EditorState } from '@codemirror/state'
+import { Decoration, drawSelection, dropCursor, EditorView, highlightActiveLine, highlightActiveLineGutter, highlightSpecialChars, keymap, lineNumbers, rectangularSelection, ViewPlugin, type DecorationSet } from '@codemirror/view'
+import { tags } from '@lezer/highlight'
+import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js'
+import { completionContext, scanSql, sqlCompletions, statementsInRange, summarizeStatement, tableAliases, type CompletionTable, type SqlStatement } from './sql'
+
+export type EditorSelection = { start: number; end: number; direction?: 'forward' | 'backward' | 'none' }
 
 type SqlEditorProps = {
   value: string
+  driver: string
   running: boolean
   tables: CompletionTable[]
-  caret?: { start: number; end: number; nonce: number }
-  onInput: (value: string, selection: { start: number; end: number }) => void
-  onUndo?: (selection: { start: number; end: number }) => void
-  onRedo?: (selection: { start: number; end: number }) => void
+  caret?: EditorSelection & { nonce: number }
+  focusNonce: number
+  onInput: (value: string, selection: EditorSelection) => void
+  onSelectionChange?: (selection: EditorSelection) => void
+  onUndo?: (selection: EditorSelection) => void
+  onRedo?: (selection: EditorSelection) => void
   onRun: (statements: string[]) => void
   onSave?: () => void
   /** Reports what a run would cover, so the panel header can drive the button. */
@@ -17,81 +30,68 @@ type SqlEditorProps = {
   onNeedColumns?: (table: string) => void
 }
 
-// The highlight layer already mirrors the textarea exactly, so a range inside it
-// gives the caret's on-screen position without a second measuring element.
-function caretRect(layer: HTMLElement, offset: number): DOMRect | null {
-  const walker = document.createTreeWalker(layer, NodeFilter.SHOW_TEXT)
-  let seen = 0
-  let node = walker.nextNode()
-  while (node) {
-    const length = node.textContent?.length ?? 0
-    if (seen + length >= offset) {
-      const range = document.createRange()
-      range.setStart(node, offset - seen)
-      range.collapse(true)
-      return range.getBoundingClientRect()
-    }
-    seen += length
-    node = walker.nextNode()
-  }
-  return null
+const queryNestHighlight = HighlightStyle.define([
+  { tag: tags.keyword, color: '#b28cff', fontWeight: '600' },
+  { tag: [tags.string, tags.regexp], color: '#6fca9f' },
+  { tag: [tags.number, tags.bool, tags.null], color: '#e0a55f' },
+  { tag: [tags.lineComment, tags.blockComment, tags.comment], color: '#4f5b68', fontStyle: 'italic' },
+  { tag: [tags.name, tags.variableName, tags.propertyName], color: '#c3cad3' },
+  { tag: [tags.typeName, tags.className], color: '#6ec5d8' },
+  { tag: [tags.operator, tags.punctuation], color: '#77828f' },
+])
+
+const queryNestTheme = EditorView.theme({}, { dark: true })
+const scopeMark = Decoration.mark({ class: 'cm-sql-scope' })
+
+function runListFor(state: EditorState) {
+  const selection = state.selection.main
+  return statementsInRange(scanSql(state.doc.toString()).statements, selection.from, selection.to)
 }
 
-// The highlight layer mirrors the textarea character for character, so the two
-// are built from the same offsets and share every metric in the stylesheet.
-function highlightNodes(text: string, tokens: SqlToken[], scope: SqlStatement | undefined): JSX.Element[] {
-  const pieces: { text: string; cls: string; start: number }[] = []
-  let cursor = 0
-  for (const token of tokens) {
-    if (token.start > cursor) pieces.push({ text: text.slice(cursor, token.start), cls: '', start: cursor })
-    pieces.push({ text: text.slice(token.start, token.end), cls: `sql-${token.type}`, start: token.start })
-    cursor = token.end
-  }
-  if (cursor < text.length) pieces.push({ text: text.slice(cursor), cls: '', start: cursor })
-
-  const paint = (list: typeof pieces) => list.map(piece => piece.cls ? <span class={piece.cls}>{piece.text}</span> : piece.text)
-  if (!scope) return [...paint(pieces), '\n']
-  // Statement boundaries always fall on token boundaries, so no piece straddles them.
-  return [
-    ...paint(pieces.filter(piece => piece.start < scope.start)),
-    <span class="sql-scope">{paint(pieces.filter(piece => piece.start >= scope.start && piece.start < scope.end))}</span>,
-    ...paint(pieces.filter(piece => piece.start >= scope.end)),
-    '\n',
-  ]
+function scopeDecorations(state: EditorState): DecorationSet {
+  const statements = runListFor(state)
+  if (statements.length !== 1 || statements[0].start === statements[0].end) return Decoration.none
+  return Decoration.set([scopeMark.range(statements[0].start, statements[0].end)])
 }
 
-export default function SqlEditor(props: SqlEditorProps) {
-  let input!: HTMLTextAreaElement
-  let highlight!: HTMLPreElement
-  let gutter!: HTMLDivElement
-  let surface!: HTMLDivElement
-  const [selection, setSelection] = createSignal({ start: 0, end: 0 })
-  const [completing, setCompleting] = createSignal(false)
-  const [highlighted, setHighlighted] = createSignal(0)
+const statementScope = ViewPlugin.fromClass(class {
+  decorations: DecorationSet
 
-  const scan = createMemo(() => scanSql(props.value))
-  const runList = createMemo(() => statementsInRange(scan().statements, selection().start, selection().end))
-  // One statement reads as "this is what runs"; several are already marked by
-  // the text selection, and a second tint on top of it only muddies both.
-  const scope = () => runList().length === 1 ? runList()[0] : undefined
-  const lines = createMemo(() => props.value.split('\n').length)
+  constructor(view: EditorView) {
+    this.decorations = scopeDecorations(view.state)
+  }
 
-  const syncSelection = () => setSelection(previous =>
-    previous.start === input.selectionStart && previous.end === input.selectionEnd
-      ? previous
-      : { start: input.selectionStart, end: input.selectionEnd })
+  update(update: { state: EditorState; docChanged: boolean; selectionSet: boolean }) {
+    if (update.docChanged || update.selectionSet) this.decorations = scopeDecorations(update.state)
+  }
+}, { decorations: plugin => plugin.decorations })
 
-  const context = createMemo(() => completing() ? completionContext(props.value, selection().start) : null)
-  const suggestions = createMemo<Completion[]>(() => {
-    const active = context()
-    return active ? sqlCompletions(active, props.tables) : []
-  })
+function selectionFromState(state: EditorState): EditorSelection {
+  const range = state.selection.main
+  return {
+    start: range.from,
+    end: range.to,
+    direction: range.empty ? 'none' : range.anchor > range.head ? 'backward' : 'forward',
+  }
+}
 
-  // Columns are fetched only for the tables the statement being written refers
-  // to: the one before a dot, and everything its FROM and JOIN clauses name.
-  createEffect(() => {
-    const active = context()
-    if (!active) return
+function codeMirrorSelection(selection: EditorSelection | undefined, length: number) {
+  const start = Math.min(selection?.start ?? 0, length)
+  const end = Math.min(selection?.end ?? start, length)
+  if (start === end) return CodeMirrorSelection.cursor(start)
+  return selection?.direction === 'backward'
+    ? CodeMirrorSelection.range(end, start)
+    : CodeMirrorSelection.range(start, end)
+}
+
+function contextualCompletionSource(props: SqlEditorProps): CompletionSource {
+  return context => {
+    const text = context.state.doc.toString()
+    const active = completionContext(text, context.pos)
+    if (!active || (!context.explicit && !active.prefix && !active.qualifier)) return null
+
+    // Fetch only columns relevant to the current statement. The workspace
+    // caches even an empty result, so failed introspection is not retried.
     const wanted = new Set<string>()
     if (active.qualifier) wanted.add(active.qualifier)
     if (active.statement) for (const table of Object.values(tableAliases(active.statement.body))) wanted.add(table)
@@ -99,122 +99,173 @@ export default function SqlEditor(props: SqlEditorProps) {
       const known = props.tables.find(table => table.name.toLowerCase() === name.toLowerCase())
       if (known && !known.columns.length) props.onNeedColumns?.(known.name)
     }
-  })
 
-  const completionTarget = () => {
-    const active = context()
-    return active ? `${active.start}:${active.qualifier}:${active.prefix}` : ''
+    const options = sqlCompletions(active, props.tables)
+      .filter(item => item.kind !== 'keyword')
+      .map(item => ({
+        label: item.label,
+        detail: item.detail,
+        type: item.kind === 'column' ? 'property' : 'class',
+        boost: item.kind === 'column' ? 90 : 50,
+      }))
+    return options.length ? { from: active.start, to: active.end, options, filter: false } : null
   }
-  createEffect(on(completionTarget, () => setHighlighted(0)))
+}
 
-  createEffect(on(runList, statements => props.onRunListChange?.(statements)))
+function contextualKeywordSource(props: SqlEditorProps): CompletionSource {
+  const dialect = props.driver === 'PostgreSQL' ? PostgreSQL : SQLite
+  const keywords = keywordCompletionSource(dialect, true)
+  return context => {
+    const active = completionContext(context.state.doc.toString(), context.pos)
+    if (!active || active.qualifier || active.wants === 'table' || (!context.explicit && !active.prefix)) return null
+    const setRange = (result: CompletionResult | null) => result ? { ...result, from: active.start, to: active.end } : null
+    const result = keywords(context)
+    return result instanceof Promise ? result.then(setRange) : setRange(result)
+  }
+}
 
-  const caretPosition = createMemo(() => {
-    if (!completing() || !suggestions().length) return null
-    const active = context()
-    if (!active) return null
-    const rect = caretRect(highlight, active.start)
-    if (!rect || !surface) return null
-    const bounds = surface.getBoundingClientRect()
-    return { left: rect.left - bounds.left, top: rect.bottom - bounds.top }
-  })
+export default function SqlEditor(props: SqlEditorProps) {
+  let host!: HTMLDivElement
+  let view: EditorView | undefined
+  let applyingExternal = false
+  let restoreAfterWindowFocus = false
+  const [runList, setRunList] = createSignal<SqlStatement[]>([])
 
-  function accept(item: Completion) {
-    const active = context()
-    if (!active) return
-    const caret = active.start + item.label.length
-    props.onInput(props.value.slice(0, active.start) + item.label + props.value.slice(active.end), { start: caret, end: caret })
-    setCompleting(false)
-    queueMicrotask(() => { input.focus(); input.setSelectionRange(caret, caret); syncSelection() })
+  const reportRunList = (state: EditorState) => {
+    const statements = runListFor(state)
+    setRunList(statements)
+    props.onRunListChange?.(statements)
   }
 
-  // Offer suggestions once there is something to match on, or on request.
-  function considerCompleting() {
-    const active = completionContext(props.value, input.selectionStart)
-    setCompleting(Boolean(active && (active.prefix.length >= 1 || active.qualifier)))
-  }
-
-  const syncScroll = () => {
-    highlight.scrollTop = input.scrollTop
-    highlight.scrollLeft = input.scrollLeft
-    gutter.scrollTop = input.scrollTop
+  const restoreFocus = (selection: EditorSelection | undefined = props.caret) => {
+    if (!view) return
+    view.dispatch({ selection: codeMirrorSelection(selection, view.state.doc.length), scrollIntoView: true })
+    view.focus()
   }
 
   onMount(() => {
-    // selectionchange is the only event that covers every way a caret moves:
-    // typing, arrows, dragging, and the system's own text services.
-    const onSelectionChange = () => { if (document.activeElement === input) syncSelection() }
-    document.addEventListener('selectionchange', onSelectionChange)
-    onCleanup(() => document.removeEventListener('selectionchange', onSelectionChange))
-    syncSelection()
+    const dialect = props.driver === 'PostgreSQL' ? PostgreSQL : SQLite
+    const relationCompletion = contextualCompletionSource(props)
+    const keywordCompletion = contextualKeywordSource(props)
+    const run = () => {
+      if (!view || props.running) return true
+      props.onRun(runListFor(view.state).map(statement => statement.body))
+      return true
+    }
+    const save = () => {
+      if (!props.onSave) return false
+      props.onSave()
+      return true
+    }
+    const undo = () => {
+      if (!view || !props.onUndo) return false
+      props.onUndo(selectionFromState(view.state))
+      return true
+    }
+    const redo = () => {
+      if (!view || !props.onRedo) return false
+      props.onRedo(selectionFromState(view.state))
+      return true
+    }
+
+    view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc: props.value,
+        selection: codeMirrorSelection(props.caret, props.value.length),
+        extensions: [
+          lineNumbers(),
+          highlightActiveLineGutter(),
+          highlightSpecialChars(),
+          foldGutter(),
+          drawSelection(),
+          dropCursor(),
+          rectangularSelection(),
+          highlightActiveLine(),
+          highlightSelectionMatches(),
+          indentOnInput(),
+          bracketMatching(),
+          closeBrackets(),
+          sql({ dialect }),
+          syntaxHighlighting(queryNestHighlight),
+          queryNestTheme,
+          statementScope,
+          autocompletion({ override: [relationCompletion, keywordCompletion], activateOnTyping: true, closeOnBlur: true }),
+          keymap.of([
+            { key: 'Mod-Enter', run },
+            { key: 'Mod-s', run: save },
+            { key: 'Mod-z', run: undo },
+            { key: 'Mod-Shift-z', run: redo },
+            { key: 'Mod-y', run: redo },
+            ...completionKeymap,
+            ...closeBracketsKeymap,
+            indentWithTab,
+            ...searchKeymap,
+            ...foldKeymap,
+            ...defaultKeymap,
+          ]),
+          EditorView.contentAttributes.of({ 'aria-label': 'SQL editor', spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off' }),
+          EditorView.updateListener.of(update => {
+            // Depending on the WebView, the editor may lose focus just before
+            // the window blur event. Remember that path from either event so
+            // returning with Alt+Tab restores the real CodeMirror selection.
+            if (update.focusChanged && !update.view.hasFocus && !document.hasFocus()) restoreAfterWindowFocus = true
+            if (applyingExternal) return
+            const selection = selectionFromState(update.state)
+            if (update.docChanged) props.onInput(update.state.doc.toString(), selection)
+            if (update.docChanged || update.selectionSet) {
+              props.onSelectionChange?.(selection)
+              reportRunList(update.state)
+            }
+          }),
+        ],
+      }),
+    })
+    reportRunList(view.state)
+
+    const onWindowBlur = () => { if (view?.hasFocus) restoreAfterWindowFocus = true }
+    const onWindowFocus = () => {
+      if (!restoreAfterWindowFocus) return
+      restoreAfterWindowFocus = false
+      queueMicrotask(() => { if (view) restoreFocus(selectionFromState(view.state)) })
+    }
+    window.addEventListener('blur', onWindowBlur)
+    window.addEventListener('focus', onWindowFocus)
+    queueMicrotask(() => restoreFocus())
+
+    onCleanup(() => {
+      window.removeEventListener('blur', onWindowBlur)
+      window.removeEventListener('focus', onWindowFocus)
+      view?.destroy()
+      view = undefined
+    })
   })
 
-  createEffect(on(() => props.caret?.nonce, () => {
-    const caret = props.caret
-    if (!caret) return
-    queueMicrotask(() => { input.focus(); input.setSelectionRange(caret.start, caret.end); syncSelection() })
+  createEffect(on(() => props.value, value => {
+    if (!view || value === view.state.doc.toString()) return
+    const current = selectionFromState(view.state)
+    applyingExternal = true
+    try {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: value },
+        selection: codeMirrorSelection(current, value.length),
+      })
+      reportRunList(view.state)
+    } finally { applyingExternal = false }
   }, { defer: true }))
 
-  // Replacing the document from outside, such as opening another script, leaves
-  // the old scroll offset behind on the layer that does not scroll itself.
-  createEffect(on(() => props.value, () => queueMicrotask(syncScroll), { defer: true }))
+  createEffect(on(() => props.caret?.nonce, () => queueMicrotask(() => restoreFocus()), { defer: true }))
+  createEffect(on(() => props.focusNonce, () => queueMicrotask(() => restoreFocus()), { defer: true }))
+
+  // Refresh an open completion popup when lazy column metadata arrives.
+  createEffect(on(() => props.tables.map(table => `${table.schema}.${table.name}:${table.columns.join(',')}`).join('|'), () => {
+    if (!view || completionStatus(view.state) !== 'active') return
+    closeCompletion(view)
+    queueMicrotask(() => { if (view) startCompletion(view) })
+  }, { defer: true }))
 
   return <div class="editor-wrap">
-    <div class="line-numbers" ref={gutter} aria-hidden="true">
-      <For each={Array.from({ length: lines() }, (_, line) => line + 1)}>{line => <span>{line}</span>}</For>
-    </div>
-    <div class="sql-surface" ref={surface}>
-      <pre class="sql-highlight" ref={highlight} aria-hidden="true">{highlightNodes(props.value, scan().tokens, scope())}</pre>
-      <textarea
-        ref={input}
-        class="sql-input"
-        value={props.value}
-        spellcheck={false}
-        autocomplete="off"
-        autocapitalize="off"
-        wrap="off"
-        aria-label="SQL editor"
-        onInput={event => { props.onInput(event.currentTarget.value, { start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd }); syncSelection(); considerCompleting() }}
-        onScroll={syncScroll}
-        onSelect={syncSelection}
-        onClick={syncSelection}
-        onKeyUp={syncSelection}
-        onBlur={() => setCompleting(false)}
-        onKeyDown={event => {
-          const open = completing() && suggestions().length > 0
-          if (open) {
-            if (event.key === 'ArrowDown') { event.preventDefault(); setHighlighted(index => (index + 1) % suggestions().length); return }
-            if (event.key === 'ArrowUp') { event.preventDefault(); setHighlighted(index => (index - 1 + suggestions().length) % suggestions().length); return }
-            if (event.key === 'Enter' || event.key === 'Tab') { event.preventDefault(); accept(suggestions()[highlighted()]); return }
-            if (event.key === 'Escape') { event.preventDefault(); setCompleting(false); return }
-          }
-          const step = (event.metaKey || event.ctrlKey) && (event.key.toLowerCase() === 'z' || event.key.toLowerCase() === 'y')
-          if (step) {
-            // Setting value from outside clears the textarea's own undo stack,
-            // so the history has to be ours end to end.
-            event.preventDefault()
-            const selection = { start: input.selectionStart, end: input.selectionEnd }
-            if (event.key.toLowerCase() === 'y' || event.shiftKey) props.onRedo?.(selection)
-            else props.onUndo?.(selection)
-            return
-          }
-          if ((event.ctrlKey || event.metaKey) && event.key === ' ') { event.preventDefault(); setCompleting(true); return }
-          if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); props.onRun(runList().map(statement => statement.body)) }
-          if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's' && props.onSave) { event.preventDefault(); props.onSave() }
-        }}
-      />
-      <Show when={caretPosition()}>{position =>
-        <ul class="sql-completions" role="listbox" aria-label="SQL suggestions" style={{ left: `${position().left}px`, top: `${position().top}px` }}>
-          <For each={suggestions()}>{(item, index) =>
-            <li role="option" aria-selected={index() === highlighted()} class={index() === highlighted() ? 'active' : ''}
-              onMouseDown={event => { event.preventDefault(); accept(item) }} onMouseEnter={() => setHighlighted(index())}>
-              <span class={`sql-completion-kind ${item.kind}`}>{item.kind[0].toUpperCase()}</span>
-              <b>{item.label}</b><small>{item.detail}</small>
-            </li>
-          }</For>
-        </ul>
-      }</Show>
-    </div>
+    <div class="sql-editor-host" ref={host}/>
     <Show when={runList().length > 1}>
       <aside class="sql-run-list" role="status" aria-label="Statements this run will execute">
         <header>{runList().length} statements will run</header>
