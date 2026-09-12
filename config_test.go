@@ -72,6 +72,7 @@ func TestAppConfigMigratesLegacyFileToSharedDataDirectory(t *testing.T) {
 		Sidebars:   SidebarPreferences{Databases: 1.75, Tables: 1.25},
 		Appearance: AppearancePreferences{FontSize: 18, FontFamily: "mono"},
 		Transfer:   TransferPreferences{BackupBatchSizeMB: 500},
+		Editing:    EditingPreferences{UndoHistoryLimit: 100, CaretWidth: 2, EditorFontSize: 12, EditorFontFamily: "mono"},
 	}
 	if err := writeAppConfig(app.legacyConfigPath, want, nil); err != nil {
 		t.Fatal(err)
@@ -125,7 +126,7 @@ func TestAppConfigRejectsInvalidSettingsWithoutOverwriting(t *testing.T) {
 	app := NewApp()
 	app.configPath = filepath.Join(t.TempDir(), "config.json")
 	valid := SidebarPreferences{Databases: 1, Tables: 1}
-	for _, content := range []string{`{`, `null`, `[]`, `{"version":2}`, `{"sidebars":{"tables":3}}`, `{"appearance":{"fontSize":30}}`, `{"appearance":{"fontFamily":"unknown"}}`, `{"transfer":{"backupBatchSizeMB":0}}`} {
+	for _, content := range []string{`{`, `null`, `[]`, `{"version":2}`, `{"sidebars":{"tables":3}}`, `{"appearance":{"fontSize":30}}`, `{"appearance":{"fontFamily":""}}`, `{"transfer":{"backupBatchSizeMB":0}}`} {
 		if err := os.WriteFile(app.configPath, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -145,7 +146,7 @@ func TestAppConfigRejectsInvalidSettingsWithoutOverwriting(t *testing.T) {
 			t.Fatalf("accepted invalid size: %v", value)
 		}
 	}
-	for _, preferences := range []AppearancePreferences{{FontSize: 13, FontFamily: "system"}, {FontSize: 21, FontFamily: "system"}, {FontSize: 17, FontFamily: "unknown"}} {
+	for _, preferences := range []AppearancePreferences{{FontSize: 13, FontFamily: "system"}, {FontSize: 21, FontFamily: "system"}, {FontSize: 17, FontFamily: ""}, {FontSize: 17, FontFamily: "bad\nfont"}} {
 		if err := app.SaveAppearancePreferences(preferences); err == nil {
 			t.Fatalf("accepted invalid appearance: %#v", preferences)
 		}
@@ -180,5 +181,76 @@ func TestAppConfigConcurrentUpdatesRemainReadable(t *testing.T) {
 	files, err := os.ReadDir(filepath.Dir(app.configPath))
 	if err != nil || len(files) != 1 || files[0].Name() != "config.json" {
 		t.Fatalf("left temporary files behind: %v, %v", files, err)
+	}
+}
+
+func TestEditingPreferencesRoundTripAndValidation(t *testing.T) {
+	app := NewApp()
+	app.configPath = filepath.Join(t.TempDir(), ".querynet", "config.json")
+	config, err := app.LoadAppConfig(SidebarPreferences{Databases: 1, Tables: 1})
+	if err != nil || config.Editing != (EditingPreferences{UndoHistoryLimit: 100, CaretWidth: 2, EditorFontSize: 12, EditorFontFamily: "mono"}) {
+		t.Fatalf("default editing preferences: %#v, %v", config.Editing, err)
+	}
+	if err := app.SaveEditingPreferences(EditingPreferences{UndoHistoryLimit: 25, CaretWidth: 3, EditorFontSize: 15, EditorFontFamily: "JetBrains Mono"}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := app.LoadAppConfig(SidebarPreferences{Databases: 1, Tables: 1})
+	if err != nil || reloaded.Editing != (EditingPreferences{UndoHistoryLimit: 25, CaretWidth: 3, EditorFontSize: 15, EditorFontFamily: "JetBrains Mono"}) {
+		t.Fatalf("persisted editing preferences: %#v, %v", reloaded.Editing, err)
+	}
+	if reloaded.Transfer.BackupBatchSizeMB != 500 || reloaded.Appearance.FontSize != 17 {
+		t.Fatalf("saving editing preferences disturbed other sections: %#v", reloaded)
+	}
+	for _, limit := range []int{9, 1001, 0, -1} {
+		if err := app.SaveEditingPreferences(EditingPreferences{UndoHistoryLimit: limit, CaretWidth: 2, EditorFontSize: 12, EditorFontFamily: "mono"}); err == nil {
+			t.Fatalf("accepted out-of-range undo history limit %d", limit)
+		}
+	}
+	for _, width := range []int{0, 5, -1} {
+		if err := app.SaveEditingPreferences(EditingPreferences{UndoHistoryLimit: 100, CaretWidth: width, EditorFontSize: 12, EditorFontFamily: "mono"}); err == nil {
+			t.Fatalf("accepted out-of-range caret width %d", width)
+		}
+	}
+	for _, size := range []int{9, 25, 0} {
+		if err := app.SaveEditingPreferences(EditingPreferences{UndoHistoryLimit: 100, CaretWidth: 2, EditorFontSize: size, EditorFontFamily: "mono"}); err == nil {
+			t.Fatalf("accepted out-of-range editor font size %d", size)
+		}
+	}
+	if err := app.SaveEditingPreferences(EditingPreferences{UndoHistoryLimit: 100, CaretWidth: 2, EditorFontSize: 12}); err == nil {
+		t.Fatal("accepted an empty editor font family")
+	}
+	after, err := app.LoadAppConfig(SidebarPreferences{Databases: 1, Tables: 1})
+	if err != nil || after.Editing != (EditingPreferences{UndoHistoryLimit: 25, CaretWidth: 3, EditorFontSize: 15, EditorFontFamily: "JetBrains Mono"}) {
+		t.Fatalf("rejected write changed stored settings: %#v, %v", after.Editing, err)
+	}
+}
+
+func TestAppConfigWithoutEditingSectionKeepsDefault(t *testing.T) {
+	app := NewApp()
+	app.configPath = filepath.Join(t.TempDir(), "config.json")
+	// A config written before the editing section existed must still load.
+	legacy := `{"version":1,"sidebars":{"databases":1,"tables":1},"appearance":{"fontSize":18,"fontFamily":"mono"},"transfer":{"backupBatchSizeMB":250}}`
+	if err := os.WriteFile(app.configPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := app.LoadAppConfig(SidebarPreferences{Databases: 1, Tables: 1})
+	if err != nil || config.Editing != (EditingPreferences{UndoHistoryLimit: 100, CaretWidth: 2, EditorFontSize: 12, EditorFontFamily: "mono"}) {
+		t.Fatalf("missing editing section: %#v, %v", config.Editing, err)
+	}
+	if config.Appearance.FontSize != 18 || config.Transfer.BackupBatchSizeMB != 250 {
+		t.Fatalf("existing settings were not preserved: %#v", config)
+	}
+}
+
+func TestAppConfigWithoutCaretWidthKeepsDefault(t *testing.T) {
+	app := NewApp()
+	app.configPath = filepath.Join(t.TempDir(), "config.json")
+	legacy := `{"version":1,"sidebars":{"databases":1,"tables":1},"appearance":{"fontSize":17,"fontFamily":"system"},"transfer":{"backupBatchSizeMB":500},"editing":{"undoHistoryLimit":60}}`
+	if err := os.WriteFile(app.configPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := app.LoadAppConfig(SidebarPreferences{Databases: 1, Tables: 1})
+	if err != nil || config.Editing != (EditingPreferences{UndoHistoryLimit: 60, CaretWidth: 2, EditorFontSize: 12, EditorFontFamily: "mono"}) {
+		t.Fatalf("missing caret width: %#v, %v", config.Editing, err)
 	}
 }

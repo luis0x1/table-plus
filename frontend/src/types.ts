@@ -32,6 +32,18 @@ export interface TransferTablePreview {
   rows: number
 }
 
+export interface ScriptFile {
+  name: string
+  size: number
+  modified: string
+}
+
+export interface TransferSkippedTable {
+  schema: string
+  name: string
+  reason: string
+}
+
 export interface TransferPreview {
   kind: 'backup' | 'restore' | 'export' | 'import'
   path: string
@@ -39,6 +51,8 @@ export interface TransferPreview {
   driver: string
   database: string
   tables: TransferTablePreview[]
+  skipped?: TransferSkippedTable[]
+  statements?: number
 }
 
 export interface TransferResult {
@@ -46,6 +60,7 @@ export interface TransferResult {
   tables: number
   rows: number
   skipped: number
+  statements?: number
 }
 
 export interface PostgresConfig {
@@ -134,7 +149,7 @@ export interface SidebarPreferences {
   tables: number
 }
 
-export type FontFamily = 'system' | 'humanist' | 'serif' | 'mono'
+export type FontFamily = string
 
 export interface AppearancePreferences {
   fontSize: number
@@ -145,9 +160,17 @@ export interface TransferPreferences {
   backupBatchSizeMB: number
 }
 
+export interface EditingPreferences {
+  undoHistoryLimit: number
+  caretWidth: number
+  editorFontSize: number
+  editorFontFamily: string
+}
+
 export interface AppConfig {
   version: number
   sidebars: SidebarPreferences
   appearance: AppearancePreferences
   transfer: TransferPreferences
+  editing: EditingPreferences
 }

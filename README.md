@@ -1,6 +1,6 @@
 # QueryNest
 
-QueryNest is a focused desktop database browser inspired by the workflow of TablePlus. It is built with Go, Wails, React, and TypeScript.
+QueryNest is a focused desktop database browser inspired by the workflow of TablePlus. It is built with Go, Wails, SolidJS, and TypeScript.
 
 The current MVP supports SQLite and PostgreSQL in read-only mode:
 

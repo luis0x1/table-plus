@@ -9,15 +9,20 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@material-symbols-svg/react": "^0.14.0",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "@codemirror/autocomplete": "^6.20.3",
+    "@codemirror/commands": "^6.11.0",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/language": "^6.12.4",
+    "@codemirror/search": "^6.7.2",
+    "@codemirror/state": "^6.7.4",
+    "@codemirror/view": "^6.43.11",
+    "@lezer/highlight": "^1.2.3",
+    "solid-js": "^1.9.15"
   },
   "devDependencies": {
-    "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.2.0",
-    "@vitejs/plugin-react": "^5.0.2",
+    "@material-symbols-svg/react": "^0.14.0",
     "typescript": "^5.9.2",
-    "vite": "^7.1.4"
+    "vite": "^7.1.4",
+    "vite-plugin-solid": "^2.11.14"
   }
 }
