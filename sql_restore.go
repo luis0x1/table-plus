@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -43,6 +45,8 @@ type restoreSQLScanner struct {
 	isTrigger        bool
 	triggerBegin     int
 	triggerCase      int
+	lineStart        bool
+	skippedMeta      int64
 }
 
 func openRestoreSQLScanner(path string) (*restoreSQLScanner, error) {
@@ -63,7 +67,7 @@ func openRestoreSQLScanner(path string) (*restoreSQLScanner, error) {
 	if marker, _ := reader.Peek(3); bytes.Equal(marker, []byte{0xef, 0xbb, 0xbf}) {
 		_, _ = reader.Discard(3)
 	}
-	return &restoreSQLScanner{file: file, reader: reader}, nil
+	return &restoreSQLScanner{file: file, reader: reader, lineStart: true}, nil
 }
 
 func (scanner *restoreSQLScanner) Close() error { return scanner.file.Close() }
@@ -207,6 +211,20 @@ func (scanner *restoreSQLScanner) Next() (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("read SQL dump: %w", err)
 		}
+		wasLineStart := scanner.lineStart
+		scanner.lineStart = value == '\n'
+		if scanner.state == restoreSQLNormal && wasLineStart && value == '\\' && !scanner.hasCode {
+			// Plain pg_dump files can contain psql-only commands such as
+			// \restrict, \unrestrict and \connect. They are not SQL and the
+			// active QueryNest connection is already the restore target.
+			if _, readErr := scanner.reader.ReadString('\n'); readErr != nil && !errors.Is(readErr, io.EOF) {
+				return "", fmt.Errorf("read SQL dump command: %w", readErr)
+			}
+			scanner.lineStart = true
+			scanner.skippedMeta++
+			scanner.resetStatement()
+			continue
+		}
 		scanner.statement.WriteByte(value)
 
 		switch scanner.state {
@@ -327,6 +345,271 @@ func (scanner *restoreSQLScanner) Next() (string, error) {
 	}
 }
 
+func restoreSQLBody(statement string) string {
+	body := strings.TrimSpace(statement)
+	for body != "" {
+		switch {
+		case strings.HasPrefix(body, "--"):
+			if newline := strings.IndexByte(body, '\n'); newline >= 0 {
+				body = strings.TrimSpace(body[newline+1:])
+				continue
+			}
+			return ""
+		case strings.HasPrefix(body, "/*"):
+			if end := strings.Index(body[2:], "*/"); end >= 0 {
+				body = strings.TrimSpace(body[end+4:])
+				continue
+			}
+			return ""
+		default:
+			return body
+		}
+	}
+	return ""
+}
+
+var (
+	pgDumpCopyPattern = regexp.MustCompile(`(?is)^copy\s+(.+?)\s*\((.*)\)\s+from\s+stdin(?:\s+with\s*\([^)]*\))?\s*;?\s*$`)
+	ownerToPattern    = regexp.MustCompile(`(?is)\bowner\s+to\b`)
+)
+
+func splitPGDumpIdentifiers(value string, separator byte) ([]string, error) {
+	parts := make([]string, 0, 2)
+	start := 0
+	quoted := false
+	for index := 0; index < len(value); index++ {
+		switch value[index] {
+		case '"':
+			if quoted && index+1 < len(value) && value[index+1] == '"' {
+				index++
+				continue
+			}
+			quoted = !quoted
+		case separator:
+			if !quoted {
+				part := strings.TrimSpace(value[start:index])
+				if part == "" {
+					return nil, errors.New("empty identifier in COPY statement")
+				}
+				parts = append(parts, part)
+				start = index + 1
+			}
+		}
+	}
+	if quoted {
+		return nil, errors.New("unterminated quoted identifier in COPY statement")
+	}
+	part := strings.TrimSpace(value[start:])
+	if part == "" {
+		return nil, errors.New("empty identifier in COPY statement")
+	}
+	return append(parts, part), nil
+}
+
+func unquotePGDumpIdentifier(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, `"`) {
+		if strings.ContainsAny(value, " \t\r\n\"") {
+			return "", fmt.Errorf("invalid unquoted identifier %q", value)
+		}
+		return value, nil
+	}
+	if len(value) < 2 || !strings.HasSuffix(value, `"`) {
+		return "", fmt.Errorf("unterminated quoted identifier %q", value)
+	}
+	return strings.ReplaceAll(value[1:len(value)-1], `""`, `"`), nil
+}
+
+func parsePGDumpCopyStatement(statement, driver string) (string, []string, bool, error) {
+	body := restoreSQLBody(statement)
+	match := pgDumpCopyPattern.FindStringSubmatch(body)
+	if len(match) == 0 {
+		return "", nil, false, nil
+	}
+	targetText := strings.TrimSpace(match[1])
+	if strings.HasPrefix(strings.ToLower(targetText), "only ") {
+		targetText = strings.TrimSpace(targetText[len("only "):])
+	}
+	targetParts, err := splitPGDumpIdentifiers(targetText, '.')
+	if err != nil || len(targetParts) > 2 {
+		if err == nil {
+			err = errors.New("COPY target must be a table or schema-qualified table")
+		}
+		return "", nil, true, err
+	}
+	table, err := unquotePGDumpIdentifier(targetParts[len(targetParts)-1])
+	if err != nil {
+		return "", nil, true, err
+	}
+	schema := defaultSchema(driver)
+	if len(targetParts) == 2 {
+		schema, err = unquotePGDumpIdentifier(targetParts[0])
+		if err != nil {
+			return "", nil, true, err
+		}
+	}
+	columnParts, err := splitPGDumpIdentifiers(match[2], ',')
+	if err != nil {
+		return "", nil, true, err
+	}
+	columns := make([]string, len(columnParts))
+	quotedColumns := make([]string, len(columnParts))
+	placeholders := make([]string, len(columnParts))
+	for index, part := range columnParts {
+		columns[index], err = unquotePGDumpIdentifier(part)
+		if err != nil {
+			return "", nil, true, err
+		}
+		quotedColumns[index] = quoteIdentifier(columns[index])
+		placeholders[index] = placeholder(driver, index+1)
+	}
+	identityOverride := ""
+	if driver == driverPostgres {
+		// COPY FROM writes the supplied identity values. Preserve that behavior
+		// when the text dump is streamed through parameterized INSERTs.
+		identityOverride = " OVERRIDING SYSTEM VALUE"
+	}
+	query := fmt.Sprintf("INSERT INTO %s (%s)%s VALUES (%s)", qualifiedIdentifier(schema, table), strings.Join(quotedColumns, ", "), identityOverride, strings.Join(placeholders, ", "))
+	return query, columns, true, nil
+}
+
+func decodePGDumpCopyValue(value string) (any, error) {
+	if value == `\N` {
+		return nil, nil
+	}
+	var decoded strings.Builder
+	decoded.Grow(len(value))
+	for index := 0; index < len(value); index++ {
+		if value[index] != '\\' || index+1 >= len(value) {
+			decoded.WriteByte(value[index])
+			continue
+		}
+		index++
+		escaped := value[index]
+		switch escaped {
+		case 'b':
+			decoded.WriteByte('\b')
+		case 'f':
+			decoded.WriteByte('\f')
+		case 'n':
+			decoded.WriteByte('\n')
+		case 'r':
+			decoded.WriteByte('\r')
+		case 't':
+			decoded.WriteByte('\t')
+		case 'v':
+			decoded.WriteByte('\v')
+		case 'x':
+			start := index + 1
+			end := start
+			for end < len(value) && end < start+2 && (value[end] >= '0' && value[end] <= '9' || value[end] >= 'a' && value[end] <= 'f' || value[end] >= 'A' && value[end] <= 'F') {
+				end++
+			}
+			if end == start {
+				decoded.WriteByte('x')
+				continue
+			}
+			parsed, err := strconv.ParseUint(value[start:end], 16, 8)
+			if err != nil {
+				return nil, fmt.Errorf("decode COPY hex escape: %w", err)
+			}
+			decoded.WriteByte(byte(parsed))
+			index = end - 1
+		default:
+			if escaped >= '0' && escaped <= '7' {
+				start := index
+				end := start + 1
+				for end < len(value) && end < start+3 && value[end] >= '0' && value[end] <= '7' {
+					end++
+				}
+				parsed, err := strconv.ParseUint(value[start:end], 8, 8)
+				if err != nil {
+					return nil, fmt.Errorf("decode COPY octal escape: %w", err)
+				}
+				decoded.WriteByte(byte(parsed))
+				index = end - 1
+			} else {
+				decoded.WriteByte(escaped)
+			}
+		}
+	}
+	return decoded.String(), nil
+}
+
+func (scanner *restoreSQLScanner) readCopyRows(columnCount int, consume func([]any) error) (int64, error) {
+	remainder, err := scanner.reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return 0, fmt.Errorf("read COPY data: %w", err)
+	}
+	if strings.TrimSpace(remainder) != "" {
+		return 0, errors.New("COPY data must start on the line after FROM stdin")
+	}
+	if errors.Is(err, io.EOF) {
+		return 0, errors.New("COPY data is missing its \\. terminator")
+	}
+	scanner.lineStart = true
+	var rows int64
+	for {
+		line, readErr := scanner.reader.ReadString('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return rows, fmt.Errorf("read COPY row %d: %w", rows+1, readErr)
+		}
+		line = strings.TrimSuffix(line, "\n")
+		line = strings.TrimSuffix(line, "\r")
+		if line == `\.` {
+			scanner.lineStart = true
+			return rows, nil
+		}
+		if errors.Is(readErr, io.EOF) {
+			return rows, errors.New("COPY data is missing its \\. terminator")
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) != columnCount {
+			return rows, fmt.Errorf("COPY row %d has %d values; expected %d", rows+1, len(fields), columnCount)
+		}
+		values := make([]any, len(fields))
+		for index, field := range fields {
+			values[index], err = decodePGDumpCopyValue(field)
+			if err != nil {
+				return rows, fmt.Errorf("decode COPY row %d column %d: %w", rows+1, index+1, err)
+			}
+		}
+		if consume != nil {
+			if err := consume(values); err != nil {
+				return rows, err
+			}
+		}
+		rows++
+	}
+}
+
+func skipPortablePGDumpStatement(statement, driver string) bool {
+	if driver != driverPostgres {
+		return false
+	}
+	body := strings.ToLower(restoreSQLBody(statement))
+	fields := strings.Fields(body)
+	if len(fields) == 0 {
+		return false
+	}
+	switch fields[0] {
+	case "grant", "revoke":
+		return true
+	case "set":
+		return len(fields) >= 2 && (fields[1] == "role" || fields[1] == "session" && len(fields) >= 3 && fields[2] == "authorization")
+	case "reset":
+		return len(fields) >= 2 && fields[1] == "role"
+	case "alter":
+		return ownerToPattern.MatchString(body) || len(fields) >= 2 && fields[1] == "database" || len(fields) >= 3 && fields[1] == "default" && fields[2] == "privileges"
+	case "create", "drop":
+		return len(fields) >= 2 && fields[1] == "database"
+	case "comment":
+		return len(fields) >= 3 && fields[1] == "on" && fields[2] == "database"
+	default:
+		return false
+	}
+}
+
 func skipRestoreTransactionWrapper(statement string) bool {
 	match := leadingKeyword.FindStringSubmatch(statement)
 	if len(match) < 2 {
@@ -355,9 +638,19 @@ func previewSQLRestore(path, driver, database string) (TransferPreview, error) {
 		if err != nil {
 			return TransferPreview{}, err
 		}
-		if !skipRestoreTransactionWrapper(statement) {
-			statements++
+		if skipRestoreTransactionWrapper(statement) || skipPortablePGDumpStatement(statement, driver) {
+			continue
 		}
+		_, columns, copyStatement, err := parsePGDumpCopyStatement(statement, driver)
+		if err != nil {
+			return TransferPreview{}, fmt.Errorf("inspect COPY statement: %w", err)
+		}
+		if copyStatement {
+			if _, err := scanner.readCopyRows(len(columns), nil); err != nil {
+				return TransferPreview{}, err
+			}
+		}
+		statements++
 	}
 	if statements == 0 {
 		return TransferPreview{}, errors.New("SQL dump does not contain any executable statements")
@@ -403,6 +696,7 @@ func (a *App) restoreSQLDatabase(path string) (TransferResult, error) {
 
 	statements := 0
 	var rows int64
+	var skipped int64
 	for {
 		statement, err := scanner.Next()
 		if errors.Is(err, io.EOF) {
@@ -414,7 +708,36 @@ func (a *App) restoreSQLDatabase(path string) (TransferResult, error) {
 		if skipRestoreTransactionWrapper(statement) {
 			continue
 		}
+		if skipPortablePGDumpStatement(statement, driver) {
+			skipped++
+			continue
+		}
 		statements++
+		insertQuery, columns, copyStatement, err := parsePGDumpCopyStatement(statement, driver)
+		if err != nil {
+			return rollback(fmt.Errorf("restore SQL statement %d (%s): %w", statements, restoreStatementSummary(statement), err))
+		}
+		if copyStatement {
+			prepared, err := tx.Prepare(insertQuery)
+			if err != nil {
+				return rollback(fmt.Errorf("prepare COPY statement %d (%s): %w", statements, restoreStatementSummary(statement), err))
+			}
+			copied, copyErr := scanner.readCopyRows(len(columns), func(values []any) error {
+				if _, err := prepared.Exec(values...); err != nil {
+					return fmt.Errorf("insert COPY row: %w", err)
+				}
+				return nil
+			})
+			closeErr := prepared.Close()
+			if copyErr != nil {
+				return rollback(fmt.Errorf("restore COPY statement %d (%s): %w", statements, restoreStatementSummary(statement), copyErr))
+			}
+			if closeErr != nil {
+				return rollback(fmt.Errorf("close COPY statement %d: %w", statements, closeErr))
+			}
+			rows += copied
+			continue
+		}
 		result, err := tx.Exec(statement)
 		if err != nil {
 			return rollback(fmt.Errorf("restore SQL statement %d (%s): %w", statements, restoreStatementSummary(statement), err))
@@ -423,6 +746,7 @@ func (a *App) restoreSQLDatabase(path string) (TransferResult, error) {
 			rows += affected
 		}
 	}
+	skipped += scanner.skippedMeta
 	if statements == 0 {
 		return rollback(errors.New("SQL dump does not contain any executable statements"))
 	}
@@ -430,5 +754,5 @@ func (a *App) restoreSQLDatabase(path string) (TransferResult, error) {
 		return TransferResult{}, fmt.Errorf("commit SQL restore: %w", err)
 	}
 	tables, _ := a.ListTables()
-	return TransferResult{Path: filepath.Clean(path), Tables: len(tables), Rows: rows, Statements: statements}, nil
+	return TransferResult{Path: filepath.Clean(path), Tables: len(tables), Rows: rows, Skipped: skipped, Statements: statements}, nil
 }

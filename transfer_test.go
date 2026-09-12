@@ -94,6 +94,78 @@ COMMIT;`
 	}
 }
 
+func TestPostgresDumpMetadataIsPortable(t *testing.T) {
+	skipped := []string{
+		"-- Name: public; Type: SCHEMA; Owner: postgres\nALTER SCHEMA public OWNER TO postgres;",
+		"GRANT ALL ON SCHEMA public TO postgres;",
+		"REVOKE ALL ON TABLE public.notes FROM PUBLIC;",
+		"SET SESSION AUTHORIZATION postgres;",
+		"SET ROLE postgres;",
+		"ALTER DEFAULT PRIVILEGES FOR ROLE postgres GRANT SELECT ON TABLES TO reader;",
+		"CREATE DATABASE source WITH OWNER = postgres;",
+	}
+	for _, statement := range skipped {
+		if !skipPortablePGDumpStatement(statement, driverPostgres) {
+			t.Errorf("portable restore did not skip %q", statement)
+		}
+	}
+	if skipPortablePGDumpStatement("SET search_path = public, pg_catalog;", driverPostgres) {
+		t.Fatal("portable restore skipped a non-role PostgreSQL setting")
+	}
+	if skipPortablePGDumpStatement("ALTER TABLE notes ADD COLUMN value text;", driverPostgres) {
+		t.Fatal("portable restore skipped a schema change")
+	}
+	query, columns, matched, err := parsePGDumpCopyStatement(`COPY "Sales"."Order items" ("Order ID", sku) FROM stdin;`, driverPostgres)
+	if err != nil || !matched || len(columns) != 2 {
+		t.Fatalf("could not parse quoted pg_dump COPY statement: query=%q columns=%v matched=%t err=%v", query, columns, matched, err)
+	}
+	expected := `INSERT INTO "Sales"."Order items" ("Order ID", "sku") OVERRIDING SYSTEM VALUE VALUES ($1, $2)`
+	if query != expected {
+		t.Fatalf("unexpected PostgreSQL COPY insert: %q", query)
+	}
+}
+
+func TestRestorePostgresCopyTextDump(t *testing.T) {
+	app := openTestApp(t)
+	path := filepath.Join(t.TempDir(), "pg_dump.sql")
+	content := `\restrict QueryNestDump
+CREATE TABLE copied_items (id INTEGER PRIMARY KEY, value TEXT NOT NULL, note TEXT);
+COPY copied_items (id, value, note) FROM stdin;
+1	one\ttwo	\N
+2	line\nfeed	back\\slash
+\.
+\unrestrict QueryNestDump
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := previewSQLRestore(path, driverSQLite, "test")
+	if err != nil || preview.Statements != 2 {
+		t.Fatalf("unexpected COPY preview: %#v, %v", preview, err)
+	}
+	result, err := app.RestoreDatabase(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Statements != 2 || result.Rows != 2 || result.Skipped != 2 {
+		t.Fatalf("unexpected COPY restore result: %#v", result)
+	}
+	var value string
+	var note *string
+	if err := app.db.QueryRow(`SELECT value, note FROM copied_items WHERE id = 1`).Scan(&value, &note); err != nil {
+		t.Fatal(err)
+	}
+	if value != "one\ttwo" || note != nil {
+		t.Fatalf("COPY escapes or NULL were not restored: value=%q note=%v", value, note)
+	}
+	if err := app.db.QueryRow(`SELECT value, note FROM copied_items WHERE id = 2`).Scan(&value, &note); err != nil {
+		t.Fatal(err)
+	}
+	if value != "line\nfeed" || note == nil || *note != `back\slash` {
+		t.Fatalf("COPY escaped row was not restored: value=%q note=%v", value, note)
+	}
+}
+
 func TestStreamingBackupRestoreAndPendingRename(t *testing.T) {
 	app := openTestApp(t)
 	if _, err := app.db.Exec(`CREATE TABLE archive_test (id INTEGER PRIMARY KEY, payload BLOB NOT NULL); CREATE INDEX archive_test_payload_idx ON archive_test(payload); INSERT INTO archive_test VALUES (1, x'00FF10')`); err != nil {
