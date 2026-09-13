@@ -19,6 +19,10 @@ func openTestSession(t *testing.T, app *App, name string) ConnectionStatus {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// TempDir cleanup removes the SQLite file on Windows, where an open
+	// database handle prevents deletion. Register this after TempDir so the
+	// session is closed first (test cleanups run in LIFO order).
+	t.Cleanup(func() { _ = app.CloseDatabaseSession(status.ID) })
 	return status
 }
 
