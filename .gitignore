@@ -10,3 +10,6 @@ frontend/package.json.md5
 # CodeGraph index and runtime files are generated per machine.
 .codegraph/*
 !.codegraph/.gitignore
+
+# Binary produced by a bare `go build ./...` in the repository root.
+/tableplus-lite

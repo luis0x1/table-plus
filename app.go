@@ -46,6 +46,13 @@ type App struct {
 	name             string
 	driver           string
 	readOnly         bool
+	operationsMu     sync.Mutex
+	operations       map[string]*runningOperation
+	cancelledOps     map[string]struct{}
+}
+
+type runningOperation struct {
+	cancel context.CancelFunc
 }
 
 type ConnectionStatus struct {
@@ -111,7 +118,14 @@ type QueryResult struct {
 	Message      string   `json:"message"`
 }
 
-func NewApp() *App { return &App{profilesMu: &sync.Mutex{}, sessions: make(map[string]*App)} }
+func NewApp() *App {
+	return &App{
+		profilesMu:   &sync.Mutex{},
+		sessions:     make(map[string]*App),
+		operations:   make(map[string]*runningOperation),
+		cancelledOps: make(map[string]struct{}),
+	}
+}
 
 func (a *App) startup(ctx context.Context) { a.ctx = ctx }
 
@@ -338,6 +352,7 @@ func seedDemo(path string) error {
 func (a *App) Disconnect() error { return a.closeDB() }
 
 func (a *App) closeDB() error {
+	a.cancelAllOperations()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.db == nil {
@@ -347,6 +362,61 @@ func (a *App) closeDB() error {
 	a.db, a.path, a.name, a.driver, a.readOnly = nil, "", "", "", false
 	a.postgresConfig = nil
 	return err
+}
+
+// beginOperation gives a user-visible database command its own cancellation
+// scope. The identity check in cleanup prevents an old command from removing a
+// newer command that accidentally reused the same ID.
+func (a *App) beginOperation(id string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	if id == "" {
+		return ctx, cancel
+	}
+	operation := &runningOperation{cancel: cancel}
+	a.operationsMu.Lock()
+	_, cancelled := a.cancelledOps[id]
+	delete(a.cancelledOps, id)
+	if previous := a.operations[id]; previous != nil {
+		previous.cancel()
+	}
+	a.operations[id] = operation
+	a.operationsMu.Unlock()
+	if cancelled {
+		cancel()
+	}
+	return ctx, func() {
+		cancel()
+		a.operationsMu.Lock()
+		if a.operations[id] == operation {
+			delete(a.operations, id)
+		}
+		a.operationsMu.Unlock()
+	}
+}
+
+func (a *App) CancelOperation(id string) bool {
+	a.operationsMu.Lock()
+	operation := a.operations[id]
+	if operation == nil && id != "" {
+		a.cancelledOps[id] = struct{}{}
+	}
+	a.operationsMu.Unlock()
+	if operation == nil {
+		return id != ""
+	}
+	operation.cancel()
+	return true
+}
+
+func (a *App) cancelAllOperations() {
+	a.operationsMu.Lock()
+	operations := a.operations
+	a.operations = make(map[string]*runningOperation)
+	a.cancelledOps = make(map[string]struct{})
+	a.operationsMu.Unlock()
+	for _, operation := range operations {
+		operation.cancel()
+	}
 }
 
 func (a *App) swapDB(db *sql.DB, path, name, driver string, readOnly bool, config *PostgresConfig) {
@@ -541,9 +611,114 @@ func (a *App) GetTableData(schema, table string, limit, offset int, filter, sort
 	return data, nil
 }
 
-var leadingKeyword = regexp.MustCompile(`(?is)^\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*([a-z]+)`)
+var (
+	leadingKeyword   = regexp.MustCompile(`(?is)^\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*([a-z]+)`)
+	returningKeyword = regexp.MustCompile(`(?is)\breturning\b`)
+)
 
 func (a *App) ExecuteQuery(query string) (QueryResult, error) {
+	return a.executeQuery(context.Background(), query)
+}
+
+func (a *App) ExecuteQueryTracked(operationID, query string) (QueryResult, error) {
+	ctx, finish := a.beginOperation(operationID)
+	defer finish()
+	return a.executeQuery(ctx, query)
+}
+
+// ExecuteScriptStatement runs one statement from a saved SQL script. The
+// scratch query console continues to use ExecuteQuery and therefore remains
+// read-only; keeping separate methods makes that boundary explicit.
+func (a *App) ExecuteScriptStatement(query string) (QueryResult, error) {
+	return a.executeScriptStatement(context.Background(), query)
+}
+
+func (a *App) ExecuteScriptStatementTracked(operationID, query string) (QueryResult, error) {
+	ctx, finish := a.beginOperation(operationID)
+	defer finish()
+	return a.executeScriptStatement(ctx, query)
+}
+
+func (a *App) executeScriptStatement(ctx context.Context, query string) (QueryResult, error) {
+	started := time.Now()
+	db, driver, err := a.connection()
+	if err != nil {
+		return QueryResult{}, err
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return QueryResult{}, errors.New("statement is empty")
+	}
+	match := leadingKeyword.FindStringSubmatch(query)
+	if len(match) < 2 {
+		return QueryResult{}, errors.New("unable to parse statement")
+	}
+	keyword := strings.ToLower(match[1])
+	if a.GetStatus().ReadOnly {
+		if !readOnlyStatementAllowed(keyword, driver) {
+			return QueryResult{}, errors.New("this database connection is read-only")
+		}
+		return a.executeQuery(ctx, query)
+	}
+	if scriptStatementReturnsRows(keyword, query, driver) {
+		rows, err := db.QueryContext(ctx, query)
+		if err != nil {
+			return QueryResult{}, err
+		}
+		defer rows.Close()
+		data, err := scanRowsLimited(rows, 1000)
+		if err != nil {
+			return QueryResult{}, err
+		}
+		if err := rows.Close(); err != nil {
+			return QueryResult{}, err
+		}
+		message := fmt.Sprintf("Returned %d row(s)", len(data.Rows))
+		if len(data.Columns) == 0 {
+			message = "Statement executed"
+		}
+		return QueryResult{Columns: data.Columns, Rows: data.Rows, RowsAffected: int64(len(data.Rows)), DurationMs: time.Since(started).Milliseconds(), Message: message}, nil
+	}
+
+	result, err := db.ExecContext(ctx, query)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	rowsAffected, affectedErr := result.RowsAffected()
+	message := "Statement executed"
+	switch keyword {
+	case "insert", "update", "delete", "merge", "replace":
+		if affectedErr == nil {
+			message = fmt.Sprintf("Affected %d row(s)", rowsAffected)
+		}
+	}
+	if affectedErr != nil {
+		rowsAffected = 0
+	}
+	return QueryResult{Columns: []string{}, Rows: [][]any{}, RowsAffected: rowsAffected, DurationMs: time.Since(started).Milliseconds(), Message: message}, nil
+}
+
+func scriptStatementReturnsRows(keyword, query, driver string) bool {
+	switch keyword {
+	case "select", "with", "explain", "show", "values", "table":
+		return true
+	case "pragma":
+		return driver == driverSQLite
+	case "insert", "update", "delete", "merge", "replace":
+		return returningKeyword.MatchString(query)
+	default:
+		return false
+	}
+}
+
+func readOnlyStatementAllowed(keyword, driver string) bool {
+	if keyword == "select" || keyword == "with" || keyword == "explain" {
+		return true
+	}
+	return keyword == "pragma" && driver == driverSQLite
+}
+
+func (a *App) executeQuery(ctx context.Context, query string) (QueryResult, error) {
 	started := time.Now()
 	db, driver, err := a.connection()
 	if err != nil {
@@ -557,19 +732,15 @@ func (a *App) ExecuteQuery(query string) (QueryResult, error) {
 	if len(match) < 2 {
 		return QueryResult{}, errors.New("unable to parse query")
 	}
-	allowed := map[string]bool{"select": true, "with": true, "explain": true}
-	if driver == driverSQLite {
-		allowed["pragma"] = true
-	}
-	if !allowed[strings.ToLower(match[1])] {
+	if !readOnlyStatementAllowed(strings.ToLower(match[1]), driver) {
 		return QueryResult{}, errors.New("read-only mode only allows SELECT, WITH, and EXPLAIN queries")
 	}
-	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return QueryResult{}, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.Query(query)
+	rows, err := tx.QueryContext(ctx, query)
 	if err != nil {
 		return QueryResult{}, err
 	}

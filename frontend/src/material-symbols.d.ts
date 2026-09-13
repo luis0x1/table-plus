@@ -1,5 +1,5 @@
 declare module 'virtual:material-symbol/*' {
-  import type { MaterialSymbolsComponent } from '@material-symbols-svg/react/rounded/w500'
-  const component: MaterialSymbolsComponent
-  export default component
+  // The build-time plugin emits the selected rounded weight's SVG path data.
+  const path: string
+  export default path
 }

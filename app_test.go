@@ -3,6 +3,7 @@ package main
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func openTestApp(t *testing.T) *App {
@@ -17,6 +18,46 @@ func openTestApp(t *testing.T) *App {
 	}
 	t.Cleanup(func() { _ = app.Disconnect() })
 	return app
+}
+
+func TestTrackedQueryCanBeCancelled(t *testing.T) {
+	app := openTestApp(t)
+	const operationID = "long-query"
+	finished := make(chan error, 1)
+	go func() {
+		_, err := app.ExecuteQueryTracked(operationID, `
+			WITH RECURSIVE numbers(value) AS (
+				SELECT 1 UNION ALL SELECT value + 1 FROM numbers WHERE value < 100000000
+			)
+			SELECT sum(value) FROM numbers
+		`)
+		finished <- err
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		app.operationsMu.Lock()
+		_, running := app.operations[operationID]
+		app.operationsMu.Unlock()
+		if running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("tracked query did not register")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !app.CancelOperation(operationID) {
+		t.Fatal("cancel did not find the tracked query")
+	}
+	select {
+	case err := <-finished:
+		if err == nil {
+			t.Fatal("cancelled query completed successfully")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("cancelled query did not stop")
+	}
 }
 
 func TestListTablesAndSchema(t *testing.T) {
@@ -172,6 +213,50 @@ func TestExecuteQueryIsReadOnly(t *testing.T) {
 	}
 	if _, err := app.ExecuteQuery(`DELETE FROM customers`); err == nil {
 		t.Fatal("expected write query to be rejected")
+	}
+}
+
+func TestExecuteScriptStatementCanWriteAndReturnRows(t *testing.T) {
+	app := openTestApp(t)
+	result, err := app.ExecuteScriptStatement(`UPDATE customers SET company = 'Script Labs' WHERE id = 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RowsAffected != 1 || result.Message != "Affected 1 row(s)" {
+		t.Fatalf("unexpected update result: %#v", result)
+	}
+
+	result, err = app.ExecuteScriptStatement(`UPDATE customers SET company = 'Returned Labs' WHERE id = 1 RETURNING id, company`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Columns) != 2 || len(result.Rows) != 1 || result.Rows[0][1] != "Returned Labs" {
+		t.Fatalf("unexpected returning result: %#v", result)
+	}
+
+	if _, err := app.ExecuteScriptStatement(`CREATE TABLE script_notes (id INTEGER PRIMARY KEY, note TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.ExecuteScriptStatement(`INSERT INTO script_notes (note) VALUES ('created from script')`); err != nil {
+		t.Fatal(err)
+	}
+	result, err = app.ExecuteScriptStatement(`SELECT note FROM script_notes`)
+	if err != nil || len(result.Rows) != 1 || result.Rows[0][0] != "created from script" {
+		t.Fatalf("script changes were not committed: %#v, %v", result, err)
+	}
+}
+
+func TestExecuteScriptStatementHonorsReadOnlyConnection(t *testing.T) {
+	app := openTestApp(t)
+	app.mu.Lock()
+	app.readOnly = true
+	app.mu.Unlock()
+	result, err := app.ExecuteScriptStatement(`SELECT name FROM customers WHERE id = 1`)
+	if err != nil || len(result.Rows) != 1 {
+		t.Fatalf("read-only connection rejected a script query: %#v, %v", result, err)
+	}
+	if _, err := app.ExecuteScriptStatement(`DELETE FROM customers`); err == nil {
+		t.Fatal("read-only connection accepted a script write")
 	}
 }
 

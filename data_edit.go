@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -15,6 +16,16 @@ type RowOperation struct {
 }
 
 func (a *App) ApplyChanges(schema, table string, operations []RowOperation) (int64, error) {
+	return a.applyChanges(context.Background(), schema, table, operations)
+}
+
+func (a *App) ApplyChangesTracked(operationID, schema, table string, operations []RowOperation) (int64, error) {
+	ctx, finish := a.beginOperation(operationID)
+	defer finish()
+	return a.applyChanges(ctx, schema, table, operations)
+}
+
+func (a *App) applyChanges(ctx context.Context, schema, table string, operations []RowOperation) (int64, error) {
 	db, driver, readOnly, err := a.editableConnection()
 	if err != nil {
 		return 0, err
@@ -40,7 +51,7 @@ func (a *App) ApplyChanges(schema, table string, operations []RowOperation) (int
 			primaryColumns = append(primaryColumns, column.Name)
 		}
 	}
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -51,7 +62,7 @@ func (a *App) ApplyChanges(schema, table string, operations []RowOperation) (int
 			_ = tx.Rollback()
 			return 0, err
 		}
-		result, err := tx.Exec(statement, args...)
+		result, err := tx.ExecContext(ctx, statement, args...)
 		if err != nil {
 			_ = tx.Rollback()
 			return 0, fmt.Errorf("apply %s: %w", operation.Type, err)

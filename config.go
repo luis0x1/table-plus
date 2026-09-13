@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Scales keep sidebar sizes proportional to the compact/regular window layout.
@@ -24,11 +25,19 @@ type TransferPreferences struct {
 	BackupBatchSizeMB int64 `json:"backupBatchSizeMB"`
 }
 
+type EditingPreferences struct {
+	UndoHistoryLimit int    `json:"undoHistoryLimit"`
+	CaretWidth       int    `json:"caretWidth"`
+	EditorFontSize   int    `json:"editorFontSize"`
+	EditorFontFamily string `json:"editorFontFamily"`
+}
+
 type AppConfig struct {
 	Version    int                   `json:"version"`
 	Sidebars   SidebarPreferences    `json:"sidebars"`
 	Appearance AppearancePreferences `json:"appearance"`
 	Transfer   TransferPreferences   `json:"transfer"`
+	Editing    EditingPreferences    `json:"editing"`
 }
 
 func defaultAppConfig() AppConfig {
@@ -37,6 +46,7 @@ func defaultAppConfig() AppConfig {
 		Sidebars:   SidebarPreferences{Databases: 1, Tables: 1},
 		Appearance: AppearancePreferences{FontSize: 17, FontFamily: "system"},
 		Transfer:   TransferPreferences{BackupBatchSizeMB: 500},
+		Editing:    EditingPreferences{UndoHistoryLimit: 100, CaretWidth: 2, EditorFontSize: 12, EditorFontFamily: "mono"},
 	}
 }
 
@@ -59,19 +69,26 @@ func validSidebarPreferences(p SidebarPreferences) bool {
 }
 
 func validAppearancePreferences(p AppearancePreferences) bool {
-	if p.FontSize < 14 || p.FontSize > 20 {
+	return p.FontSize >= 14 && p.FontSize <= 20 && validFontFamily(p.FontFamily)
+}
+
+func validFontFamily(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 128 {
 		return false
 	}
-	switch p.FontFamily {
-	case "system", "humanist", "serif", "mono":
-		return true
-	default:
-		return false
-	}
+	return !strings.ContainsAny(value, "\x00\r\n")
 }
 
 func validTransferPreferences(p TransferPreferences) bool {
 	return p.BackupBatchSizeMB >= 1 && p.BackupBatchSizeMB <= 10240
+}
+
+func validEditingPreferences(p EditingPreferences) bool {
+	return p.UndoHistoryLimit >= 10 && p.UndoHistoryLimit <= 1000 &&
+		p.CaretWidth >= 1 && p.CaretWidth <= 4 &&
+		p.EditorFontSize >= 10 && p.EditorFontSize <= 24 &&
+		validFontFamily(p.EditorFontFamily)
 }
 
 // LoadAppConfig migrates the legacy file or browser preferences when the new
@@ -145,7 +162,7 @@ func (a *App) SaveSidebarPreferences(preferences SidebarPreferences) error {
 
 func (a *App) SaveAppearancePreferences(preferences AppearancePreferences) error {
 	if !validAppearancePreferences(preferences) {
-		return errors.New("font size must be between 14 and 20 and font family must be supported")
+		return errors.New("font size must be between 14 and 20 and font family must be a valid installed font name")
 	}
 	a.configMu.Lock()
 	defer a.configMu.Unlock()
@@ -179,6 +196,24 @@ func (a *App) SaveTransferPreferences(preferences TransferPreferences) error {
 	return writeAppConfig(path, config, fields)
 }
 
+func (a *App) SaveEditingPreferences(preferences EditingPreferences) error {
+	if !validEditingPreferences(preferences) {
+		return errors.New("invalid editor settings")
+	}
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	path, err := a.appConfigPath()
+	if err != nil {
+		return err
+	}
+	config, fields, err := readAppConfig(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	config.Version, config.Editing = 1, preferences
+	return writeAppConfig(path, config, fields)
+}
+
 func readAppConfig(path string) (AppConfig, map[string]json.RawMessage, error) {
 	config := defaultAppConfig()
 	data, err := os.ReadFile(path)
@@ -203,6 +238,9 @@ func readAppConfig(path string) (AppConfig, map[string]json.RawMessage, error) {
 	}
 	if !validTransferPreferences(config.Transfer) {
 		return config, nil, errors.New("read configuration: invalid data operation settings")
+	}
+	if !validEditingPreferences(config.Editing) {
+		return config, nil, errors.New("read configuration: invalid editing settings")
 	}
 	return config, fields, nil
 }
@@ -246,6 +284,20 @@ func writeAppConfig(path string, config AppConfig, fields map[string]json.RawMes
 	}
 	transfer["backupBatchSizeMB"], _ = json.Marshal(config.Transfer.BackupBatchSizeMB)
 	fields["transfer"], _ = json.Marshal(transfer)
+	editing := make(map[string]json.RawMessage)
+	if raw := fields["editing"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &editing); err != nil {
+			return fmt.Errorf("read editing configuration: %w", err)
+		}
+		if editing == nil {
+			editing = make(map[string]json.RawMessage)
+		}
+	}
+	editing["undoHistoryLimit"], _ = json.Marshal(config.Editing.UndoHistoryLimit)
+	editing["caretWidth"], _ = json.Marshal(config.Editing.CaretWidth)
+	editing["editorFontSize"], _ = json.Marshal(config.Editing.EditorFontSize)
+	editing["editorFontFamily"], _ = json.Marshal(config.Editing.EditorFontFamily)
+	fields["editing"], _ = json.Marshal(editing)
 	fields["version"], _ = json.Marshal(config.Version)
 	data, err := json.MarshalIndent(fields, "", "  ")
 	if err != nil {

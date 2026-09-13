@@ -22,6 +22,23 @@ func openTestSession(t *testing.T, app *App, name string) ConnectionStatus {
 	return status
 }
 
+func TestCreateDatabaseValidationAndSQLiteBoundary(t *testing.T) {
+	for _, value := range []string{"", "   ", "bad\nname", strings.Repeat("a", 64)} {
+		if _, err := normalizeDatabaseName(value); err == nil {
+			t.Fatalf("accepted invalid database name %q", value)
+		}
+	}
+	if name, err := normalizeDatabaseName(" analytics_dev "); err != nil || name != "analytics_dev" {
+		t.Fatalf("normalization returned %q, %v", name, err)
+	}
+	app := NewApp()
+	t.Cleanup(func() { app.shutdown(context.Background()) })
+	session := openTestSession(t, app, "sqlite-create-boundary")
+	if err := app.CreateDatabase(session.ID, "another"); err == nil || !strings.Contains(err.Error(), "SQLite") {
+		t.Fatalf("SQLite session accepted server database creation: %v", err)
+	}
+}
+
 func TestDatabaseSessionsIsolateReadsAndWrites(t *testing.T) {
 	app := NewApp()
 	t.Cleanup(func() { app.shutdown(context.Background()) })
@@ -57,6 +74,10 @@ func TestDatabaseSessionsIsolateReadsAndWrites(t *testing.T) {
 	workers.Wait()
 	if _, err := app.SessionExecuteQuery(first.ID, "DELETE FROM customers"); err == nil {
 		t.Fatal("session SQL console must remain read-only")
+	}
+	result, err := app.SessionExecuteScriptStatement(first.ID, "UPDATE customers SET company = 'Saved script' WHERE id = 1")
+	if err != nil || result.RowsAffected != 1 {
+		t.Fatalf("saved script could not write through its session: %#v, %v", result, err)
 	}
 	if err := app.CloseDatabaseSession(first.ID); err != nil {
 		t.Fatal(err)
