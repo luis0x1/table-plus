@@ -110,11 +110,12 @@ GitHub Actions builds production artifacts only when a commit reaches `main`, in
 
 Each run produces:
 
-- `QueryNest-windows-amd64.exe` and `QueryNest-portable-windows-amd64.exe` for Windows x64
-- `QueryNest-macos-universal.zip` and `QueryNest-portable-macos-universal.zip` for Intel and Apple Silicon Macs
+- `QueryNestInstaller.exe`, an NSIS installer for Windows x64
+- `QueryNestPortal.exe`, the portable Windows x64 application
+- `QueryNest-macos-universal.zip`, containing the universal `QueryNest.app` bundle and its `Contents/Info.plist`, for Intel and Apple Silicon Macs
 - A SHA-256 checksum beside each package
 
-The workflow first uploads all four build artifacts, then waits for every desktop and portable build to succeed before publishing one GitHub Release tagged `build-<run-number>-<short-sha>`. Workflow artifacts remain available for 30 days; GitHub Release assets remain attached to the release. The macOS bundles are ad-hoc signed, so public distribution without Gatekeeper warnings still requires an Apple Developer ID certificate and notarization credentials.
+The workflow first uploads all three build artifacts, then waits for every build to succeed before publishing one GitHub Release tagged `build-<run-number>-<short-sha>`. Workflow artifacts remain available for 30 days; GitHub Release assets remain attached to the release. The macOS bundle is ad-hoc signed, so public distribution without Gatekeeper warnings still requires an Apple Developer ID certificate and notarization credentials.
 
 ## Frontend-only preview
 
