@@ -32,7 +32,12 @@ func TestUpdateSavedConnection(t *testing.T) {
 	if err := app.UpdateSavedConnection(SavedConnectionUpdate{ID: "sqlite", Name: "Renamed", Driver: driverSQLite, Path: updatedSQLitePath}); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.UpdateSavedConnection(SavedConnectionUpdate{ID: "postgres", Name: "Production", Driver: driverPostgres, Host: " db.example.com ", User: " app_user ", Database: " main ", ReadOnly: true, SavePassword: true}); err != nil {
+	if err := app.UpdateSavedConnection(SavedConnectionUpdate{
+		ID: "postgres", Name: "Production", Driver: driverPostgres, Host: " db.example.com ",
+		User: " app_user ", Database: " main ", SSLRootCert: " /certs/root.pem ",
+		SSLClientCert: " /certs/client.pem ", SSLClientKey: " /certs/client.key ",
+		TLSServerName: " postgres.internal ", ReadOnly: true, SavePassword: true,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	profiles, err := app.ListSavedConnections()
@@ -43,7 +48,7 @@ func TestUpdateSavedConnection(t *testing.T) {
 		t.Fatalf("SQLite profile was not updated: %#v", profiles[0])
 	}
 	postgres := profiles[1]
-	if postgres.Name != "Production" || postgres.Host != "db.example.com" || postgres.Port != 5432 || postgres.User != "app_user" || postgres.Database != "main" || postgres.SSLMode != "prefer" || !postgres.ReadOnly || !postgres.HasPassword {
+	if postgres.Name != "Production" || postgres.Host != "db.example.com" || postgres.Port != 5432 || postgres.User != "app_user" || postgres.Database != "main" || postgres.SSLMode != "verify-full" || postgres.SSLRootCert != "/certs/root.pem" || postgres.SSLClientCert != "/certs/client.pem" || postgres.SSLClientKey != "/certs/client.key" || postgres.TLSServerName != "postgres.internal" || !postgres.ReadOnly || !postgres.HasPassword {
 		t.Fatalf("PostgreSQL profile was not updated safely: %#v", postgres)
 	}
 	data, err := os.ReadFile(filepath.Join(app.dataDirOverride, "connections.json"))

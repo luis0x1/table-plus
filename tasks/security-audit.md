@@ -21,7 +21,7 @@ boundary, and insufficient validation of SQL stored in `.qnb` backups.
 
 ## P0 — High severity
 
-### [ ] Enforce a real read-only boundary for the SQLite query console
+### [x] Enforce a real read-only boundary for the SQLite query console
 
 Locations:
 
@@ -59,7 +59,7 @@ Acceptance criteria:
 - The protection is enforced in Go and does not depend on the frontend scanner.
 - SQLite and PostgreSQL read-only tests cover direct backend/bridge calls.
 
-### [ ] Make identifier qualification driver-safe
+### [x] Make identifier qualification driver-safe
 
 Locations:
 
@@ -86,7 +86,7 @@ Acceptance criteria:
 
 - Every operation targets the exact schema/table pair that was validated.
 
-### [ ] Preserve 64-bit primary keys across the Go/JavaScript boundary
+### [x] Preserve 64-bit primary keys across the Go/JavaScript boundary
 
 Locations:
 
@@ -115,7 +115,7 @@ Acceptance criteria:
 
 - Every supported primary-key value round-trips without precision loss.
 
-### [ ] Validate `.qnb` SQL against its manifest
+### [x] Validate `.qnb` SQL against its manifest
 
 Locations:
 
@@ -147,7 +147,13 @@ Acceptance criteria:
 
 ## P1 — Medium severity
 
-### [ ] Use authenticated PostgreSQL TLS defaults
+### [x] Use authenticated PostgreSQL TLS defaults
+
+An omitted SSL mode now defaults to `verify-full` for non-local hosts, and the
+connection form warns when a remote host uses a mode that does not authenticate
+the server. Root CA, client certificate/key and an explicit TLS server name can
+be configured and are retained in saved profiles; passwords remain exclusively
+in the operating-system credential manager.
 
 Locations: `app.go:242`, `app.go:261`, `frontend/src/App.tsx:230`,
 `frontend/src/App.tsx:2117`.
@@ -158,6 +164,11 @@ CA/client certificates and server-name verification.
 
 ### [ ] Add resource budgets and cancellation to untrusted inputs
 
+Partial remediation: hard byte budgets now cover query cells/results, backup
+compression and decompression, SQL dumps/statements, manifests, and CSV/JSON
+imports. Row, table, object and column counts are bounded. Streaming JSON,
+explicit operation timeouts, JSON-depth checks and lazy BLOB handling remain.
+
 Locations: `app.go:969`, `transfer.go:483`, `transfer.go:687`,
 `transfer.go:1211`, `sql_restore.go:35`.
 
@@ -167,7 +178,7 @@ limit. Add compressed/decompressed byte limits, result and cell budgets,
 maximum object/table/column/row counts, JSON depth limits, streaming imports,
 lazy BLOB handling, timeouts and cancellation.
 
-### [ ] Bind preview and execution to the same file
+### [x] Bind preview and execution to the same file
 
 Locations: `transfer.go:449`, `transfer.go:529`, `transfer.go:1124`,
 `transfer.go:1256`, `frontend/src/bridge.ts:31`.
@@ -178,7 +189,7 @@ the canonical path, digest, device/inode, size and modification time. Execution
 should accept the token, not an arbitrary renderer-provided path, and require a
 new preview when the identity changes.
 
-### [ ] Create backup temporary files safely
+### [x] Create backup temporary files safely
 
 Locations: `transfer.go:295`, `transfer.go:296`, `transfer.go:400`.
 
@@ -187,7 +198,7 @@ an exclusive random temporary file in the destination directory, reject
 symlinks, retain the handle, fsync the file and directory, then rename
 atomically.
 
-### [ ] Offer spreadsheet-safe CSV export
+### [x] Offer spreadsheet-safe CSV export
 
 Locations: `transfer.go:954`, `transfer.go:991`, `transfer.go:995`.
 
@@ -198,7 +209,7 @@ mode when exact CSV fidelity is required.
 
 ## P2 — Low severity
 
-### [ ] Close the `.qnb` preview reader
+### [x] Close the `.qnb` preview reader
 
 Locations: `transfer.go:468`, `transfer.go:483`.
 
@@ -206,7 +217,7 @@ Locations: `transfer.go:468`, `transfer.go:483`.
 reader on every path and add a repeated-preview file-descriptor regression
 test.
 
-### [ ] Bound cancellation tombstones
+### [x] Bound cancellation tombstones
 
 Locations: `app.go:397`, `app.go:401`.
 
@@ -216,17 +227,29 @@ limits.
 
 ## Defense in depth
 
-- Bind a minimal Wails facade instead of the entire exported `App` API.
-- Add an explicit CSP. No current XSS sink was found, but an eventual renderer
+- [ ] Bind a minimal Wails facade instead of the entire exported `App` API.
+- [x] Add an explicit CSP. No current XSS sink was found, but an eventual renderer
   compromise would otherwise inherit broad native database and file access.
-- Pin GitHub Actions to full commit SHAs. The release job has `contents: write`.
-- Sign Windows artifacts with Authenticode and macOS artifacts with Developer ID
+- [ ] Pin GitHub Actions to full commit SHAs. The release job has `contents: write`.
+- [ ] Sign Windows artifacts with Authenticode and macOS artifacts with Developer ID
   plus notarization; publish build provenance in addition to checksums.
-- Apply regular-file/no-follow checks to portable script storage.
+- [x] Apply regular-file/no-follow checks to portable script storage.
 - Do not use the browser mock as a security oracle; keep its limits and error
   behavior synchronized with the backend where practical.
 
-## Checks completed during the audit
+## Remediation verification (2026-09-14)
+
+- `go test ./...` — passed.
+- `go test -race ./...` — passed.
+- `go vet ./...` — passed.
+- `npm --prefix frontend run build` — passed.
+- Online `npm audit --prefix frontend --audit-level=low` — zero vulnerabilities.
+- `go run ./scripts/build.go` — generated bindings and built the Linux desktop
+  application successfully.
+- The PostgreSQL restore fidelity integration test remains unrun because no
+  PostgreSQL test server or credentials were available.
+
+## Checks completed while producing the original audit
 
 - `go mod verify` — passed.
 - Backend tests — passed except one test requiring a TCP listener, which the

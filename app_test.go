@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -200,6 +201,31 @@ func TestPostgresValidationAndSQLHelpers(t *testing.T) {
 	if got := qualifiedIdentifier("sales", `order items`); got != `"sales"."order items"` {
 		t.Fatalf("unexpected qualified identifier: %q", got)
 	}
+	if got := qualifiedIdentifier("main", "orders"); got != `"main"."orders"` {
+		t.Fatalf("main schema was not qualified: %q", got)
+	}
+	remote, err := normalizePostgresConfig(PostgresConfig{Host: "db.example.com", User: "app", Database: "app"})
+	if err != nil || remote.SSLMode != "verify-full" {
+		t.Fatalf("remote PostgreSQL default is not authenticated: %#v, %v", remote, err)
+	}
+	local, err := normalizePostgresConfig(PostgresConfig{Host: "127.0.0.1", User: "app", Database: "app"})
+	if err != nil || local.SSLMode != "prefer" {
+		t.Fatalf("local PostgreSQL default changed unexpectedly: %#v, %v", local, err)
+	}
+	certificates, err := normalizePostgresConfig(PostgresConfig{
+		Host: "db.example.com", User: "app", Database: "app",
+		SSLRootCert: " /certs/root.pem ", SSLClientCert: " /certs/client.pem ",
+		SSLClientKey: " /certs/client.key ", TLSServerName: " postgres.internal ",
+	})
+	if err != nil || certificates.SSLRootCert != "/certs/root.pem" || certificates.SSLClientCert != "/certs/client.pem" || certificates.SSLClientKey != "/certs/client.key" || certificates.TLSServerName != "postgres.internal" {
+		t.Fatalf("PostgreSQL certificate configuration was not normalized: %#v, %v", certificates, err)
+	}
+	if _, err := normalizePostgresConfig(PostgresConfig{Host: "db.example.com", User: "app", Database: "app", SSLClientCert: "/certs/client.pem"}); err == nil {
+		t.Fatal("client certificate without a private key must be rejected")
+	}
+	if _, err := normalizePostgresConfig(PostgresConfig{Host: "db.example.com", User: "app", Database: "app", SSLMode: "disable", SSLRootCert: "/certs/root.pem"}); err == nil {
+		t.Fatal("certificate settings with disabled TLS must be rejected")
+	}
 }
 
 func TestExecuteQueryIsReadOnly(t *testing.T) {
@@ -213,6 +239,39 @@ func TestExecuteQueryIsReadOnly(t *testing.T) {
 	}
 	if _, err := app.ExecuteQuery(`DELETE FROM customers`); err == nil {
 		t.Fatal("expected write query to be rejected")
+	}
+	result, err = app.ExecuteQuery(`WITH candidate AS (SELECT 1) SELECT 'safe;value'`)
+	if err != nil || len(result.Rows) != 1 || result.Rows[0][0] != "safe;value" {
+		t.Fatalf("safe CTE query failed: %#v, %v", result, err)
+	}
+	blocked := []string{
+		`WITH candidate AS (SELECT 1) DELETE FROM customers`,
+		`WITH candidate AS (SELECT 1) UPDATE customers SET company = 'unsafe'`,
+		`WITH candidate AS (SELECT 1) INSERT INTO customers (id, name, email, status, created_at) VALUES (99, 'Unsafe', 'unsafe@example.com', 'active', '2026-01-01')`,
+		`PRAGMA writable_schema = ON`,
+		`PRAGMA query_only = OFF`,
+		`BEGIN`,
+		`SELECT 1; DELETE FROM customers`,
+		`EXPLAIN DELETE FROM customers`,
+	}
+	for _, query := range blocked {
+		if _, err := app.ExecuteQuery(query); err == nil {
+			t.Errorf("read-only console accepted %q", query)
+		}
+	}
+	var count int
+	if err := app.db.QueryRow(`SELECT count(*) FROM customers`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 8 {
+		t.Fatalf("read-only query changed customer rows: %d", count)
+	}
+}
+
+func TestCancelOperationRejectsUnknownID(t *testing.T) {
+	app := NewApp()
+	if app.CancelOperation("not-running") {
+		t.Fatal("unknown operation was retained as a cancellation tombstone")
 	}
 }
 
@@ -271,6 +330,43 @@ func TestUpdateCellByPrimaryKey(t *testing.T) {
 	}
 	if data.Total != 1 || data.Rows[0][3] != "Acme Labs" {
 		t.Fatalf("updated value was not returned: %#v", data)
+	}
+}
+
+func TestLargeIntegerPrimaryKeysRemainLossless(t *testing.T) {
+	app := openTestApp(t)
+	if _, err := app.db.Exec(`CREATE TABLE big_keys (id INTEGER PRIMARY KEY, note TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	keys := []int64{9007199254740992, 9007199254740993, 9223372036854775807}
+	for _, key := range keys {
+		if _, err := app.db.Exec(`INSERT INTO big_keys (id, note) VALUES (?, ?)`, key, "original"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := app.GetTableData("main", "big_keys", 10, 0, "", "id", "asc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Rows) != len(keys) {
+		t.Fatalf("got %d rows, want %d", len(data.Rows), len(keys))
+	}
+	for index, key := range keys {
+		wire, ok := data.Rows[index][0].(WireValue)
+		if !ok || wire.Type != "int64" || wire.Value != strconv.FormatInt(key, 10) {
+			t.Fatalf("key %d was not preserved: %#v", key, data.Rows[index][0])
+		}
+	}
+	target := map[string]any{"type": "int64", "value": strconv.FormatInt(keys[1], 10)}
+	if _, err := app.ApplyChanges("main", "big_keys", []RowOperation{{Type: "update", Values: map[string]any{"note": "updated"}, PrimaryKey: map[string]any{"id": target}}}); err != nil {
+		t.Fatal(err)
+	}
+	var note string
+	if err := app.db.QueryRow(`SELECT note FROM big_keys WHERE id = ?`, keys[1]).Scan(&note); err != nil || note != "updated" {
+		t.Fatalf("lossless key update failed: %q, %v", note, err)
+	}
+	if err := app.db.QueryRow(`SELECT note FROM big_keys WHERE id = ?`, keys[0]).Scan(&note); err != nil || note != "original" {
+		t.Fatalf("adjacent key was changed: %q, %v", note, err)
 	}
 }
 

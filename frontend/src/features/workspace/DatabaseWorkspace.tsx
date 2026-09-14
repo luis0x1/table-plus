@@ -586,7 +586,7 @@ export default function DatabaseWorkspace(props: {
   async function openTransferPreview(
     load: () => Promise<TransferPreview>,
     refs: TableRef[],
-    format: 'csv' | 'json' = 'json',
+    format: 'csv' | 'csv-raw' | 'json' = 'json',
   ) {
     setTransferBusy(true)
     setError('')
@@ -594,7 +594,7 @@ export default function DatabaseWorkspace(props: {
       const preview = await load()
       if (preview.kind === 'restore' && preview.driver !== status.driver)
         throw new Error(`This ${preview.driver} backup cannot be restored into ${status.driver}.`)
-      if (preview.kind) setTransferDialog({ preview, tables: refs, format, conflict: 'abort' })
+      if (preview.kind) setTransferDialog({ preview, tables: refs, format, conflict: 'abort', restoreCode: false })
     } catch (e) {
       setError(String(e))
     } finally {
@@ -652,15 +652,15 @@ export default function DatabaseWorkspace(props: {
   async function runTransfer() {
     const dialog = transferDialog()
     if (!dialog || transferBusy()) return
-    const { preview, tables: refs, format, conflict } = dialog
+    const { preview, tables: refs, format, conflict, restoreCode } = dialog
     setTransferBusy(true)
     setError('')
     try {
       let result: TransferResult
       if (preview.kind === 'backup') result = await db.BackupDatabase(props.transferPreferences.backupBatchSizeMB)
-      else if (preview.kind === 'restore') result = await db.RestoreDatabase(preview.path)
+      else if (preview.kind === 'restore') result = await db.RestoreDatabase(preview.token ?? '', restoreCode)
       else if (preview.kind === 'export') result = await db.ExportTables(refs, format)
-      else result = await db.ImportTable(refs[0], preview.path, conflict)
+      else result = await db.ImportTable(refs[0], preview.token ?? '', conflict)
       if (!result.path && (preview.kind === 'backup' || preview.kind === 'export')) return
       setTransferDialog(null)
       const skipped = result.skipped ? ` · ${result.skipped.toLocaleString()} skipped` : ''
