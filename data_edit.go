@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -102,7 +103,11 @@ func buildRowOperation(driver, schema, table string, operation RowOperation, all
 		}
 		columns, places, args := make([]string, len(keys)), make([]string, len(keys)), make([]any, len(keys))
 		for index, key := range keys {
-			columns[index], places[index], args[index] = quoteIdentifier(key), placeholder(driver, index+1), operation.Values[key]
+			value, err := decodeWireValue(operation.Values[key])
+			if err != nil {
+				return "", nil, fmt.Errorf("column %s: %w", key, err)
+			}
+			columns[index], places[index], args[index] = quoteIdentifier(key), placeholder(driver, index+1), value
 		}
 		return "INSERT INTO " + qualified + " (" + strings.Join(columns, ", ") + ") VALUES (" + strings.Join(places, ", ") + ")", args, nil
 	case "update":
@@ -118,7 +123,11 @@ func buildRowOperation(driver, schema, table string, operation RowOperation, all
 		}
 		args, sets := make([]any, 0, len(keys)+len(primaryColumns)), make([]string, len(keys))
 		for index, key := range keys {
-			args = append(args, operation.Values[key])
+			value, err := decodeWireValue(operation.Values[key])
+			if err != nil {
+				return "", nil, fmt.Errorf("column %s: %w", key, err)
+			}
+			args = append(args, value)
 			sets[index] = quoteIdentifier(key) + " = " + placeholder(driver, len(args))
 		}
 		where, err := primaryKeyPredicate(driver, operation.PrimaryKey, primaryColumns, &args)
@@ -160,6 +169,10 @@ func primaryKeyPredicate(driver string, values map[string]any, columns []string,
 		if !ok {
 			return "", fmt.Errorf("missing primary key value for %s", name)
 		}
+		value, err := decodeWireValue(value)
+		if err != nil {
+			return "", fmt.Errorf("primary key %s: %w", name, err)
+		}
 		*args = append(*args, value)
 		operator := "IS"
 		if driver == driverPostgres {
@@ -200,6 +213,10 @@ func (a *App) UpdateCell(schema, table, column string, value any, primaryKey map
 		return errors.New("editing requires a primary key")
 	}
 
+	value, err = decodeWireValue(value)
+	if err != nil {
+		return fmt.Errorf("column %s: %w", column, err)
+	}
 	args := []any{value}
 	where := ""
 	for index, name := range primaryColumns {
@@ -213,6 +230,10 @@ func (a *App) UpdateCell(schema, table, column string, value any, primaryKey map
 		operator := "IS"
 		if driver == driverPostgres {
 			operator = "IS NOT DISTINCT FROM"
+		}
+		keyValue, err = decodeWireValue(keyValue)
+		if err != nil {
+			return fmt.Errorf("primary key %s: %w", name, err)
 		}
 		args = append(args, keyValue)
 		where += quoteIdentifier(name) + " " + operator + " " + placeholder(driver, len(args))
@@ -237,6 +258,34 @@ func (a *App) UpdateCell(schema, table, column string, value any, primaryKey map
 		return fmt.Errorf("expected to update 1 row, updated %d", affected)
 	}
 	return tx.Commit()
+}
+
+func decodeWireValue(value any) (any, error) {
+	var kind, encoded string
+	switch value := value.(type) {
+	case WireValue:
+		kind, encoded = value.Type, value.Value
+	case map[string]any:
+		var ok bool
+		kind, ok = value["type"].(string)
+		if !ok {
+			return value, nil
+		}
+		encoded, ok = value["value"].(string)
+		if !ok {
+			return nil, errors.New("typed database value is missing its string value")
+		}
+	default:
+		return value, nil
+	}
+	if kind != "int64" {
+		return nil, fmt.Errorf("unsupported typed database value %q", kind)
+	}
+	parsed, err := strconv.ParseInt(encoded, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid int64 value %q", encoded)
+	}
+	return parsed, nil
 }
 
 func (a *App) editableConnection() (*sql.DB, string, bool, error) {

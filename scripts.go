@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -81,11 +82,22 @@ func (a *App) scriptPath(name string) (string, error) {
 }
 
 func describeScript(dir, name string) (ScriptFile, error) {
-	info, err := os.Stat(filepath.Join(dir, name))
+	info, err := regularScriptInfo(filepath.Join(dir, name))
 	if err != nil {
 		return ScriptFile{}, fmt.Errorf("read script %s: %w", name, err)
 	}
 	return ScriptFile{Name: name, Size: info.Size(), Modified: info.ModTime().UTC().Format(time.RFC3339)}, nil
+}
+
+func regularScriptInfo(path string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, errors.New("script must be a regular file, not a symlink")
+	}
+	return info, nil
 }
 
 // ListScripts returns this connection's scripts. An absent workspace is an
@@ -124,16 +136,28 @@ func (a *App) ReadScript(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	info, err := os.Stat(path)
+	info, err := regularScriptInfo(path)
 	if err != nil {
 		return "", fmt.Errorf("open script %s: %w", name, err)
 	}
 	if info.Size() > maxScriptBytes {
 		return "", fmt.Errorf("script %s is %d bytes; the editor handles up to %d", name, info.Size(), maxScriptBytes)
 	}
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("read script %s: %w", name, err)
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return "", fmt.Errorf("read script %s: file changed while opening", name)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxScriptBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read script %s: %w", name, err)
+	}
+	if len(data) > maxScriptBytes {
+		return "", fmt.Errorf("script %s exceeds the editor limit", name)
 	}
 	return string(data), nil
 }
@@ -211,6 +235,9 @@ func (a *App) RenameScript(from, to string) (ScriptFile, error) {
 	if source == target {
 		return describeScript(filepath.Dir(target), filepath.Base(target))
 	}
+	if _, err := regularScriptInfo(source); err != nil {
+		return ScriptFile{}, fmt.Errorf("rename script: %w", err)
+	}
 	if _, err := os.Stat(target); err == nil {
 		return ScriptFile{}, fmt.Errorf("a script named %s already exists", filepath.Base(target))
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -226,6 +253,12 @@ func (a *App) DeleteScript(name string) error {
 	path, err := a.scriptPath(name)
 	if err != nil {
 		return err
+	}
+	if _, err := regularScriptInfo(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("delete script: %w", err)
 	}
 	if err := os.Remove(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {

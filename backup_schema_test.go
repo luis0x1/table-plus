@@ -89,13 +89,13 @@ func TestRestoreFidelity(t *testing.T) {
 		t.Fatalf("backup: %v", err)
 	}
 	target := emptyTarget(t)
-	if _, err := target.RestoreDatabase(path); err != nil {
+	if _, err := restorePreviewed(t, target, path); err != nil {
 		t.Fatalf("restore into empty database: %v", err)
 	}
 	compareSchemas(t, sqliteSchemaDump(t, source), sqliteSchemaDump(t, target))
 
 	// Restoring twice must converge rather than collide on existing objects.
-	if _, err := target.RestoreDatabase(path); err != nil {
+	if _, err := restorePreviewed(t, target, path); err != nil {
 		t.Fatalf("second restore: %v", err)
 	}
 	compareSchemas(t, sqliteSchemaDump(t, source), sqliteSchemaDump(t, target))
@@ -280,14 +280,14 @@ func TestPostgresRestoreFidelity(t *testing.T) {
 	}
 	defer target.Disconnect()
 
-	result, err := target.RestoreDatabase(path)
+	result, err := restorePreviewed(t, target, path)
 	if err != nil {
 		t.Fatalf("restore into empty database: %v", err)
 	}
 	t.Logf("restored %#v", result)
 	compareSchemas(t, postgresSchemaDump(t, source.db), postgresSchemaDump(t, target.db))
 
-	if _, err := target.RestoreDatabase(path); err != nil {
+	if _, err := restorePreviewed(t, target, path); err != nil {
 		t.Fatalf("second restore: %v", err)
 	}
 	compareSchemas(t, postgresSchemaDump(t, source.db), postgresSchemaDump(t, target.db))
@@ -372,7 +372,7 @@ func TestBackupSkipsVirtualTablesInsteadOfFailing(t *testing.T) {
 
 	// The rest of the database still restores.
 	target := emptyTarget(t)
-	if _, err := target.RestoreDatabase(path); err != nil {
+	if _, err := restorePreviewed(t, target, path); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
 	restored, err := target.ListTables()
@@ -388,5 +388,57 @@ func TestBackupSkipsVirtualTablesInsteadOfFailing(t *testing.T) {
 	}
 	if !names["customers"] || !names["orders"] || !names["active_customers"] {
 		t.Fatalf("restore lost ordinary objects: %v", names)
+	}
+}
+
+func TestValidateBackupObjectBindsSQLToManifest(t *testing.T) {
+	valid := []backupObject{
+		{Kind: objectTable, Schema: "main", Name: "safe", SQL: `CREATE TABLE "safe" (id INTEGER PRIMARY KEY)`},
+		{Kind: objectIndex, Schema: "main", Name: "safe_idx", Table: "safe", SQL: `CREATE INDEX "safe_idx" ON "safe" (id)`},
+		{Kind: objectTrigger, Schema: "main", Name: "safe_trigger", Table: "safe", SQL: `CREATE TRIGGER "safe_trigger" AFTER INSERT ON "safe" BEGIN UPDATE "safe" SET id = NEW.id; END;`},
+		{Kind: objectFunction, Schema: "audit", Name: "touch", SQL: `CREATE FUNCTION "audit"."touch"() RETURNS trigger LANGUAGE plpgsql AS $body$ BEGIN NEW.id := NEW.id; RETURN NEW; END; $body$;`},
+	}
+	for _, object := range valid {
+		if err := validateBackupObject(object); err != nil {
+			t.Errorf("valid %s rejected: %v", object.Kind, err)
+		}
+	}
+	invalid := []backupObject{
+		{Kind: objectTable, Schema: "main", Name: "reviewed", SQL: `CREATE TABLE "other" (id INTEGER)`},
+		{Kind: objectIndex, Schema: "main", Name: "reviewed_idx", Table: "reviewed", SQL: `CREATE INDEX "reviewed_idx" ON "other" (id)`},
+		{Kind: objectTrigger, Schema: "main", Name: "reviewed_trigger", Table: "reviewed", SQL: `CREATE TRIGGER "other_trigger" AFTER INSERT ON "reviewed" BEGIN SELECT 1; END;`},
+		{Kind: objectTable, Schema: "main", Name: "reviewed", SQL: `CREATE TABLE "reviewed" (id INTEGER); DROP TABLE "customers";`},
+		{Kind: objectFunction, Schema: "audit", Name: "touch", SQL: `CREATE FUNCTION "audit"."touch"() RETURNS void LANGUAGE sql AS $$ SELECT 1 $$; DROP TABLE public.customers;`},
+	}
+	for _, object := range invalid {
+		if err := validateBackupObject(object); err == nil {
+			t.Errorf("unsafe %s was accepted: %s", object.Kind, object.SQL)
+		}
+	}
+}
+
+func TestRestoreCanExcludeDatabaseCode(t *testing.T) {
+	source := openTestApp(t)
+	if _, err := source.db.Exec(`CREATE TRIGGER customer_code AFTER INSERT ON customers BEGIN UPDATE customers SET company = 'triggered' WHERE id = NEW.id; END`); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "without-code.qnb")
+	if _, err := source.writeDatabaseBackup(path, 1); err != nil {
+		t.Fatal(err)
+	}
+	target := emptyTarget(t)
+	token, err := target.registerPreviewFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.RestoreDatabase(token, false); err != nil {
+		t.Fatal(err)
+	}
+	var triggers int
+	if err := target.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'customer_code'`).Scan(&triggers); err != nil {
+		t.Fatal(err)
+	}
+	if triggers != 0 {
+		t.Fatal("restore created database code while it was excluded")
 	}
 }

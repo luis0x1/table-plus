@@ -20,6 +20,11 @@ export interface TableRef {
   name: string
 }
 
+export interface WireInt64 {
+  type: 'int64'
+  value: string
+}
+
 export interface TransferTablePreview {
   schema: string
   name: string
@@ -53,6 +58,7 @@ export interface TransferPreview {
   tables: TransferTablePreview[]
   skipped?: TransferSkippedTable[]
   statements?: number
+  token?: string
 }
 
 export interface TransferResult {
@@ -72,6 +78,10 @@ export interface PostgresConfig {
   password: string
   database: string
   sslMode: 'disable' | 'allow' | 'prefer' | 'require' | 'verify-ca' | 'verify-full'
+  sslRootCert: string
+  sslClientCert: string
+  sslClientKey: string
+  tlsServerName: string
   readOnly: boolean
   saveConnection: boolean
   savePassword: boolean
@@ -87,6 +97,10 @@ export interface SavedConnection {
   user?: string
   database?: string
   sslMode?: string
+  sslRootCert?: string
+  sslClientCert?: string
+  sslClientKey?: string
+  tlsServerName?: string
   readOnly: boolean
   hasPassword: boolean
 }
@@ -102,6 +116,10 @@ export interface SavedConnectionUpdate {
   password?: string
   database?: string
   sslMode?: string
+  sslRootCert?: string
+  sslClientCert?: string
+  sslClientKey?: string
+  tlsServerName?: string
   readOnly: boolean
   savePassword: boolean
 }
