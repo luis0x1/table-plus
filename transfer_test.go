@@ -9,6 +9,24 @@ import (
 	"testing"
 )
 
+func restorePreviewed(t *testing.T, app *App, path string) (TransferResult, error) {
+	t.Helper()
+	token, err := app.registerPreviewFile(path)
+	if err != nil {
+		return TransferResult{}, err
+	}
+	return app.RestoreDatabase(token, true)
+}
+
+func importPreviewed(t *testing.T, app *App, table TableRef, path, conflict string) (TransferResult, error) {
+	t.Helper()
+	token, err := app.registerPreviewFile(path)
+	if err != nil {
+		return TransferResult{}, err
+	}
+	return app.ImportTable(table, token, conflict)
+}
+
 func TestSQLRestoreScannerKeepsBodiesAndQuotedSemicolonsTogether(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "boundaries.sql")
 	content := "\ufeff" + `-- leading comment with ;
@@ -69,7 +87,7 @@ COMMIT;`
 	if err != nil || preview.Format != "sql" || preview.Statements != 5 {
 		t.Fatalf("unexpected SQL preview: %#v, %v", preview, err)
 	}
-	result, err := app.RestoreDatabase(path)
+	result, err := restorePreviewed(t, app, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +103,7 @@ COMMIT;`
 	if err := os.WriteFile(broken, []byte(`CREATE TABLE rolled_back (id INTEGER); INSERT INTO missing_table VALUES (1);`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.RestoreDatabase(broken); err == nil {
+	if _, err := restorePreviewed(t, app, broken); err == nil {
 		t.Fatal("invalid SQL restore unexpectedly succeeded")
 	}
 	var count int
@@ -143,7 +161,7 @@ COPY copied_items (id, value, note) FROM stdin;
 	if err != nil || preview.Statements != 2 {
 		t.Fatalf("unexpected COPY preview: %#v, %v", preview, err)
 	}
-	result, err := app.RestoreDatabase(path)
+	result, err := restorePreviewed(t, app, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +227,7 @@ func TestStreamingBackupRestoreAndPendingRename(t *testing.T) {
 	if _, err := app.db.Exec(`DROP TABLE archive_test`); err != nil {
 		t.Fatal(err)
 	}
-	restored, err := app.RestoreDatabase(path)
+	restored, err := restorePreviewed(t, app, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,11 +260,96 @@ func TestCSVImportConflictOptions(t *testing.T) {
 	if _, err := app.exportCSV(path, TableRef{Schema: "main", Name: "customers"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.ImportTable(TableRef{Schema: "main", Name: "customers"}, path, "abort"); err == nil {
+	if _, err := importPreviewed(t, app, TableRef{Schema: "main", Name: "customers"}, path, "abort"); err == nil {
 		t.Fatal("abort conflict option accepted duplicate primary keys")
 	}
-	result, err := app.ImportTable(TableRef{Schema: "main", Name: "customers"}, path, "skip")
+	result, err := importPreviewed(t, app, TableRef{Schema: "main", Name: "customers"}, path, "skip")
 	if err != nil || result.Rows != 0 || result.Skipped != 8 {
 		t.Fatalf("unexpected skip result: %#v, %v", result, err)
+	}
+}
+
+func TestSpreadsheetSafeCSVExport(t *testing.T) {
+	app := openTestApp(t)
+	if _, err := app.db.Exec(`CREATE TABLE csv_security (value TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"=2+2", "+cmd", "-1", "@SUM(A1:A2)", "\tformula", "plain"} {
+		if _, err := app.db.Exec(`INSERT INTO csv_security (value) VALUES (?)`, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	directory := t.TempDir()
+	safePath := filepath.Join(directory, "safe.csv")
+	rawPath := filepath.Join(directory, "raw.csv")
+	if _, err := app.exportCSVMode(safePath, TableRef{Schema: "main", Name: "csv_security"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.exportCSVMode(rawPath, TableRef{Schema: "main", Name: "csv_security"}, false); err != nil {
+		t.Fatal(err)
+	}
+	safe, err := os.ReadFile(safePath)
+	if err != nil || !strings.Contains(string(safe), "'=2+2") || !strings.Contains(string(safe), "'@SUM") {
+		t.Fatalf("safe CSV did not neutralize formulas: %q, %v", safe, err)
+	}
+	raw, err := os.ReadFile(rawPath)
+	if err != nil || !strings.Contains(string(raw), "=2+2") || strings.Contains(string(raw), "'=2+2") {
+		t.Fatalf("raw CSV did not preserve values: %q, %v", raw, err)
+	}
+}
+
+func TestBackupDoesNotFollowPredictablePendingSymlink(t *testing.T) {
+	app := openTestApp(t)
+	directory := t.TempDir()
+	finalPath := filepath.Join(directory, "backup.qnb")
+	legacyPending := filepath.Join(directory, "backup.pqnb")
+	victim := filepath.Join(directory, "victim.txt")
+	if err := os.WriteFile(victim, []byte("do not replace"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, legacyPending); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.writeDatabaseBackup(finalPath, 1); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(victim)
+	if err != nil || string(contents) != "do not replace" {
+		t.Fatalf("pending symlink target changed: %q, %v", contents, err)
+	}
+	if info, err := os.Lstat(legacyPending); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("legacy pending symlink was replaced: %#v, %v", info, err)
+	}
+}
+
+func TestRestoreCapabilityRejectsChangedAndUnpreviewedFiles(t *testing.T) {
+	app := openTestApp(t)
+	path := filepath.Join(t.TempDir(), "restore.sql")
+	if err := os.WriteFile(path, []byte(`CREATE TABLE safe_preview (id INTEGER);`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.RestoreDatabase(path, true); err == nil {
+		t.Fatal("raw renderer path bypassed the preview capability")
+	}
+	token, err := app.registerPreviewFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`DROP TABLE customers;`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.RestoreDatabase(token, true); err == nil {
+		t.Fatal("file changed after preview was accepted")
+	}
+	var count int
+	if err := app.db.QueryRow(`SELECT count(*) FROM customers`).Scan(&count); err != nil || count != 8 {
+		t.Fatalf("changed restore source affected database: %d, %v", count, err)
+	}
+	symlink := filepath.Join(t.TempDir(), "restore-link.sql")
+	if err := os.Symlink(path, symlink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.registerPreviewFile(symlink); err == nil {
+		t.Fatal("symlink restore source was accepted")
 	}
 }

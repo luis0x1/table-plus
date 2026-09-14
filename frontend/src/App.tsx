@@ -227,11 +227,15 @@ function SavedConnections(props: SavedConnectionsProps) {
   </section></Show>
 }
 
-const DEFAULT_POSTGRES_CONFIG: PostgresConfig = { id: '', name: 'Local PostgreSQL', host: 'localhost', port: 5432, user: 'postgres', password: '', database: 'postgres', sslMode: 'prefer', readOnly: false, saveConnection: true, savePassword: true }
+const DEFAULT_POSTGRES_CONFIG: PostgresConfig = { id: '', name: 'Local PostgreSQL', host: 'localhost', port: 5432, user: 'postgres', password: '', database: 'postgres', sslMode: 'prefer', sslRootCert: '', sslClientCert: '', sslClientKey: '', tlsServerName: '', readOnly: false, saveConnection: true, savePassword: true }
 
 function configForSaved(profile: SavedConnection): PostgresConfig {
-  return { ...DEFAULT_POSTGRES_CONFIG, id: profile.id, name: profile.name, host: profile.host ?? 'localhost', port: profile.port ?? 5432, user: profile.user ?? 'postgres', database: profile.database ?? 'postgres', sslMode: (profile.sslMode as PostgresConfig['sslMode']) ?? 'prefer', readOnly: profile.readOnly, savePassword: profile.hasPassword }
+  const host = profile.host ?? 'localhost'
+  return { ...DEFAULT_POSTGRES_CONFIG, id: profile.id, name: profile.name, host, port: profile.port ?? 5432, user: profile.user ?? 'postgres', database: profile.database ?? 'postgres', sslMode: (profile.sslMode as PostgresConfig['sslMode']) ?? (localPostgresHost(host) ? 'prefer' : 'verify-full'), sslRootCert: profile.sslRootCert ?? '', sslClientCert: profile.sslClientCert ?? '', sslClientKey: profile.sslClientKey ?? '', tlsServerName: profile.tlsServerName ?? '', readOnly: profile.readOnly, savePassword: profile.hasPassword }
 }
+
+const localPostgresHost = (host: string) => /^(localhost|127(?:\.\d+){3}|\[?::1\]?)$/i.test(host.trim()) || host.trim().startsWith('/')
+const weakPostgresTLS = (host: string, mode: PostgresConfig['sslMode']) => !localPostgresHost(host) && mode !== 'verify-ca' && mode !== 'verify-full'
 
 function Welcome(props: SavedConnectionsProps & { onOpen: () => void; onPostgres: () => void; onDemo: () => void }) {
   return <main class="welcome">
@@ -1067,7 +1071,7 @@ function DatabaseWorkspace(props: {
     try {
       const preview = await load()
       if (preview.kind === 'restore' && preview.driver !== status.driver) throw new Error(`This ${preview.driver} backup cannot be restored into ${status.driver}.`)
-      if (preview.kind) setTransferDialog({ preview, tables: refs, format, conflict: 'abort' })
+      if (preview.kind) setTransferDialog({ preview, tables: refs, format, conflict: 'abort', restoreCode: false })
     } catch (e) { setError(String(e)) }
     finally { setTransferBusy(false) }
   }
@@ -1116,9 +1120,9 @@ function DatabaseWorkspace(props: {
     try {
       let result: TransferResult
       if (preview.kind === 'backup') result = await db.BackupDatabase(props.transferPreferences.backupBatchSizeMB)
-      else if (preview.kind === 'restore') result = await db.RestoreDatabase(preview.path)
+      else if (preview.kind === 'restore') result = await db.RestoreDatabase(preview.token ?? '', dialog.restoreCode)
       else if (preview.kind === 'export') result = await db.ExportTables(refs, format)
-      else result = await db.ImportTable(refs[0], preview.path, conflict)
+      else result = await db.ImportTable(refs[0], preview.token ?? '', conflict)
       if (!result.path && (preview.kind === 'backup' || preview.kind === 'export')) return
       setTransferDialog(null)
       const skipped = result.skipped ? ` · ${result.skipped.toLocaleString()} skipped` : ''
@@ -2019,7 +2023,7 @@ function ScriptPanel(props: {
   </div>
 }
 
-type TransferState = { preview: TransferPreview; tables: TableRef[]; format: 'csv' | 'json'; conflict: 'abort' | 'skip' }
+type TransferState = { preview: TransferPreview; tables: TableRef[]; format: 'csv' | 'csv-raw' | 'json'; conflict: 'abort' | 'skip'; restoreCode: boolean }
 
 function TransferModal(props: {
   state: TransferState
@@ -2058,7 +2062,8 @@ function TransferModal(props: {
         </Show>
         <Show when={preview().kind === 'backup'}><div class="transfer-note"><Alert size={14}/><span>Data streams into a <code>.pqnb</code> pending file with checkpoints. It becomes <code>.qnb</code> only after a complete, durable write.</span></div></Show>
         <Show when={preview().kind === 'restore'}><div class="transfer-note danger"><Alert size={14}/><span>{preview().format === 'sql' ? `This SQL dump will execute ${(preview().statements ?? 0).toLocaleString()} statements against the current database.` : 'Rows and schema objects in the archived tables will be replaced.'} The restore runs in one transaction and cannot be undone after it commits.</span></div></Show>
-        <Show when={preview().kind === 'export'}><section class="transfer-options"><b>Export format</b><div><button class={props.state.format === 'csv' ? 'active' : ''} disabled={preview().tables.length > 1} onClick={() => props.onChange({ ...props.state, format: 'csv' })}>CSV</button><button class={props.state.format === 'json' ? 'active' : ''} onClick={() => props.onChange({ ...props.state, format: 'json' })}>JSON</button></div><Show when={preview().tables.length > 1}><small>Multiple tables are exported as one JSON bundle.</small></Show></section></Show>
+        <Show when={preview().kind === 'restore' && preview().format !== 'sql'}><section class="transfer-options"><b>Database code</b><div><button class={!props.state.restoreCode ? 'active' : ''} onClick={() => props.onChange({ ...props.state, restoreCode: false })}>Skip routines & triggers</button><button class={props.state.restoreCode ? 'active' : ''} onClick={() => props.onChange({ ...props.state, restoreCode: true })}>Restore database code</button></div><small>Only enable database code for backups you trust.</small></section></Show>
+        <Show when={preview().kind === 'export'}><section class="transfer-options"><b>Export format</b><div><button class={props.state.format === 'csv' ? 'active' : ''} disabled={preview().tables.length > 1} onClick={() => props.onChange({ ...props.state, format: 'csv' })}>CSV (safe)</button><button class={props.state.format === 'csv-raw' ? 'active' : ''} disabled={preview().tables.length > 1} onClick={() => props.onChange({ ...props.state, format: 'csv-raw' })}>CSV raw</button><button class={props.state.format === 'json' ? 'active' : ''} onClick={() => props.onChange({ ...props.state, format: 'json' })}>JSON</button></div><small>{props.state.format === 'csv-raw' ? 'Raw CSV preserves exact values and may execute formulas when opened in spreadsheet software.' : preview().tables.length > 1 ? 'Multiple tables are exported as one JSON bundle.' : 'Safe CSV neutralizes spreadsheet formula prefixes.'}</small></section></Show>
         <Show when={preview().kind === 'import'}><section class="transfer-options"><b>When a key conflicts</b><div><button class={props.state.conflict === 'abort' ? 'active' : ''} onClick={() => props.onChange({ ...props.state, conflict: 'abort' })}>Abort import</button><button class={props.state.conflict === 'skip' ? 'active' : ''} onClick={() => props.onChange({ ...props.state, conflict: 'skip' })}>Skip row</button></div></section></Show>
         <Show when={preview().format !== 'sql'}><section class="transfer-tables"><header><b>Column preview</b><span>{preview().tables.length > 100 ? `First 100 of ${preview().tables.length.toLocaleString()}` : `${preview().tables.length} table${preview().tables.length === 1 ? '' : 's'}`}</span></header>
           <For each={preview().tables.slice(0, 100)}>{table => <div class="transfer-table"><div><Table size={14}/><b>{table.schema}.{table.name}</b><span>{table.rows.toLocaleString()} rows</span></div><div class="transfer-columns"><For each={table.columns}>{column => <code class={table.extraColumns?.includes(column) ? 'extra' : ''}>{column}</code>}</For></div><Show when={table.missingColumns?.length}><small class={table.requiredMissing?.length ? 'invalid' : ''}>Missing target columns: {table.missingColumns.join(', ')}</small></Show></div>}</For>
@@ -2171,6 +2176,7 @@ function ConnectionModal(props: SavedConnectionsProps & { config: PostgresConfig
   const [success, setSuccess] = createSignal('')
   const pending = () => props.busy || submitting() || testing()
   const update = <K extends keyof PostgresConfig>(key: K, value: PostgresConfig[K]) => props.setConfig(current => ({ ...current, [key]: value }))
+  const updateHost = (host: string) => props.setConfig(current => ({ ...current, host, sslMode: localPostgresHost(current.host) && !localPostgresHost(host) && current.sslMode === 'prefer' ? 'verify-full' : current.sslMode }))
 
   createEffect(on(() => props.config, () => setSuccess('')))
 
@@ -2202,15 +2208,20 @@ function ConnectionModal(props: SavedConnectionsProps & { config: PostgresConfig
         <fieldset disabled={pending()}>
         <div class="form-grid">
           <label class="span-2"><span>Connection name</span><input required value={props.config.name} onInput={e => update('name', e.currentTarget.value)} placeholder="Production database"/></label>
-          <label class="span-2"><span>Host</span><input required value={props.config.host} onInput={e => update('host', e.currentTarget.value)} placeholder="localhost" ref={el => queueMicrotask(() => el.focus())}/></label>
+          <label class="span-2"><span>Host</span><input required value={props.config.host} onInput={e => updateHost(e.currentTarget.value)} placeholder="localhost" ref={el => queueMicrotask(() => el.focus())}/></label>
           <label><span>Port</span><input required type="number" min={1} max={65535} value={props.config.port} onInput={e => update('port', Number(e.currentTarget.value))}/></label>
           <div class="form-field"><span>SSL mode</span><CustomSelect label="SSL mode" value={props.config.sslMode} options={SSL_MODE_OPTIONS} disabled={pending()} onChange={value => update('sslMode', value as PostgresConfig['sslMode'])}/></div>
           <label class="span-2"><span>Database</span><input required value={props.config.database} onInput={e => update('database', e.currentTarget.value)} placeholder="postgres"/></label>
           <label><span>User</span><input required value={props.config.user} onInput={e => update('user', e.currentTarget.value)} placeholder="postgres" autocomplete="username"/></label>
           <label><span>Password</span><input type="password" value={props.config.password} onInput={e => update('password', e.currentTarget.value)} placeholder="Optional" autocomplete="current-password"/></label>
+          <label class="span-2"><span>Root CA certificate</span><input value={props.config.sslRootCert} onInput={e => update('sslRootCert', e.currentTarget.value)} placeholder="Optional path to CA certificate"/></label>
+          <label><span>Client certificate</span><input value={props.config.sslClientCert} onInput={e => update('sslClientCert', e.currentTarget.value)} placeholder="Optional certificate path"/></label>
+          <label><span>Client key</span><input value={props.config.sslClientKey} onInput={e => update('sslClientKey', e.currentTarget.value)} placeholder="Optional private-key path"/></label>
+          <label class="span-2"><span>TLS server name</span><input value={props.config.tlsServerName} onInput={e => update('tlsServerName', e.currentTarget.value)} placeholder="Defaults to the connection host"/></label>
         </div>
         <div class="connection-options"><label><input type="checkbox" checked={props.config.saveConnection} onChange={e => update('saveConnection', e.currentTarget.checked)}/><span>Save connection</span></label><label class={!props.config.saveConnection ? 'disabled' : ''}><input type="checkbox" checked={props.config.savePassword} disabled={!props.config.saveConnection} onChange={e => update('savePassword', e.currentTarget.checked)}/><span>Save password securely</span></label><label><input type="checkbox" checked={props.config.readOnly} onChange={e => update('readOnly', e.currentTarget.checked)}/><span>Read-only</span></label></div>
         </fieldset>
+        <Show when={weakPostgresTLS(props.config.host, props.config.sslMode)}><div class="connection-feedback warning" role="alert"><Alert size={15}/><span>This mode does not authenticate a remote PostgreSQL server and may permit interception. Use Verify full whenever possible.</span></div></Show>
         <Show when={success()}><div class="connection-feedback success" role="status"><Check size={15}/><span>{success()}</span></div></Show>
         <footer><button type="button" class="secondary" onClick={props.onClose} disabled={pending()}>Cancel</button><button type="submit" name="action" value="connect" class="primary" disabled={pending()}>{submitting() ? <Refresh size={15} class="spin"/> : <Database size={15}/>} {submitting() ? 'Connecting…' : 'Connect'}</button><button type="submit" name="action" value="test" class="secondary test-connection" disabled={pending()}>{testing() ? <Refresh size={15} class="spin"/> : <Play size={15}/>} {testing() ? 'Testing…' : 'Test connection'}</button></footer>
       </form>
@@ -2259,10 +2270,15 @@ function SavedConnectionEditModal(props: {
               <label class="span-2"><span>Database</span><input required value={draft().database ?? ''} onInput={event => update('database', event.currentTarget.value)}/></label>
               <label><span>User</span><input required value={draft().user ?? ''} onInput={event => update('user', event.currentTarget.value)}/></label>
               <label><span>Password</span><input type="password" value={draft().password ?? ''} disabled={!draft().savePassword} onInput={event => update('password', event.currentTarget.value)} placeholder={props.profile.hasPassword ? 'Leave blank to keep current' : 'Optional'} autocomplete="new-password"/></label>
+              <label class="span-2"><span>Root CA certificate</span><input value={draft().sslRootCert ?? ''} onInput={event => update('sslRootCert', event.currentTarget.value)} placeholder="Optional path to CA certificate"/></label>
+              <label><span>Client certificate</span><input value={draft().sslClientCert ?? ''} onInput={event => update('sslClientCert', event.currentTarget.value)} placeholder="Optional certificate path"/></label>
+              <label><span>Client key</span><input value={draft().sslClientKey ?? ''} onInput={event => update('sslClientKey', event.currentTarget.value)} placeholder="Optional private-key path"/></label>
+              <label class="span-2"><span>TLS server name</span><input value={draft().tlsServerName ?? ''} onInput={event => update('tlsServerName', event.currentTarget.value)} placeholder="Defaults to the connection host"/></label>
             </Show>
           </div>
           <Show when={postgres()}><div class="connection-options"><label><input type="checkbox" checked={draft().savePassword} onChange={event => update('savePassword', event.currentTarget.checked)}/><span>Save password securely</span></label><label><input type="checkbox" checked={draft().readOnly} onChange={event => update('readOnly', event.currentTarget.checked)}/><span>Read-only</span></label></div></Show>
         </fieldset>
+        <Show when={postgres() && weakPostgresTLS(draft().host ?? '', (draft().sslMode ?? 'prefer') as PostgresConfig['sslMode'])}><div class="connection-feedback warning" role="alert"><Alert size={15}/><span>This mode does not authenticate a remote PostgreSQL server and may permit interception. Use Verify full whenever possible.</span></div></Show>
         <footer><button type="button" class="secondary" onClick={props.onClose} disabled={pending()}>Cancel</button><button type="submit" class="primary" disabled={pending()}>{saving() ? <Refresh size={15} class="spin"/> : <Save size={15}/>} {saving() ? 'Saving…' : 'Save changes'}</button></footer>
       </form>
     </section>

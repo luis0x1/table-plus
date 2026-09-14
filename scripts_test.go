@@ -154,6 +154,34 @@ func TestScriptNamesCannotEscapeTheWorkspace(t *testing.T) {
 	}
 }
 
+func TestScriptOperationsRejectSymlinks(t *testing.T) {
+	app, dir := scriptTestApp(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(t.TempDir(), "victim.sql")
+	if err := os.WriteFile(victim, []byte("SELECT 'secret';"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "linked.sql")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.ReadScript("linked"); err == nil {
+		t.Fatal("script reader followed a symlink")
+	}
+	if _, err := app.RenameScript("linked", "renamed"); err == nil {
+		t.Fatal("script rename accepted a symlink")
+	}
+	if err := app.DeleteScript("linked"); err == nil {
+		t.Fatal("script delete accepted a symlink")
+	}
+	contents, err := os.ReadFile(victim)
+	if err != nil || string(contents) != "SELECT 'secret';" {
+		t.Fatalf("symlink target changed: %q, %v", contents, err)
+	}
+}
+
 func TestScriptSizeLimit(t *testing.T) {
 	app, _ := scriptTestApp(t)
 	if _, err := app.SaveScript("huge", strings.Repeat("-", maxScriptBytes+1)); err == nil {

@@ -1,5 +1,5 @@
 import { createEffect, createSignal, Index, mergeProps, on, onCleanup, Show, type JSX } from 'solid-js'
-import type { ColumnInfo, RowOperation, TableData } from './types'
+import type { ColumnInfo, RowOperation, TableData, WireInt64 } from './types'
 import { Alert, ArrowDown, ArrowUp, Check, Code, Columns, X } from './icons'
 
 export type PendingOperation = RowOperation & { id: string }
@@ -34,11 +34,21 @@ type DataGridProps = {
 
 function formatCell(value: unknown): JSX.Element {
   if (value === null || value === undefined) return <span class="null-value">NULL</span>
+  if (isWireInt64(value)) return value.value
   if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
 }
 
+function isWireInt64(value: unknown): value is WireInt64 {
+  return value !== null && typeof value === 'object' && (value as Partial<WireInt64>).type === 'int64' && typeof (value as Partial<WireInt64>).value === 'string'
+}
+
+function cellText(value: unknown): string {
+  return isWireInt64(value) ? value.value : String(value ?? '')
+}
+
 function jsonText(value: unknown): string | null {
+  if (isWireInt64(value)) return null
   if (value !== null && typeof value === 'object') return JSON.stringify(value, null, 2)
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
@@ -48,6 +58,7 @@ function jsonText(value: unknown): string | null {
 
 function editedValue(text: string, original: unknown): unknown {
   if (text.trim().toLowerCase() === 'null') return null
+  if (isWireInt64(original) && /^-?\d+$/.test(text.trim())) return { type: 'int64', value: text.trim() } satisfies WireInt64
   if (typeof original === 'number') { const number = Number(text); return Number.isNaN(number) ? text : number }
   if (typeof original === 'boolean') return text.toLowerCase() === 'true'
   return text
@@ -188,7 +199,7 @@ export default function DataGrid(raw: DataGridProps) {
 
   async function commitEdit() {
     const active = editing()
-    if (!active || !props.onUpdate || active.text === String(active.original ?? '')) return setEditing(null)
+    if (!active || !props.onUpdate || active.text === cellText(active.original)) return setEditing(null)
     setSaving(true)
     try { await props.onUpdate(active.column, active.row, editedValue(active.text, active.original)); setEditing(null) }
     catch { /* Parent surfaces the update error while keeping the editor open. */ }
@@ -243,12 +254,12 @@ export default function DataGrid(raw: DataGridProps) {
               <td class="row-number"><button class="row-selector" disabled={!props.onSelect || (meta()?.kind !== 'insert' && !meta()?.canEdit)} onClick={() => { const current = meta(); if (current) props.onSelect?.(current.id) }}>{selected().has(rowID()) ? <Check size={11}/> : props.rowOffset + rowIndex() + 1}</button></td>
               <Index each={shown()}>{item => {
                 const value = () => row()[item().source]
-                const text = () => String(value() ?? '')
+                const text = () => cellText(value())
                 const isStatus = () => item().column.toLowerCase() === 'status'
                 const json = () => jsonText(value())
                 const active = () => { const state = editing(); return state && state.row === rowIndex() && state.column === item().column ? state : null }
                 const canEdit = () => props.editable && (meta()?.canEdit ?? true)
-                return <td class={canEdit() ? 'editable-cell' : ''} onDblClick={() => { if (canEdit() && props.onUpdate) { cancelBlur = false; setEditing({ row: rowIndex(), column: item().column, text: String(value() ?? ''), original: value() }) } }}>
+                return <td class={canEdit() ? 'editable-cell' : ''} onDblClick={() => { if (canEdit() && props.onUpdate) { cancelBlur = false; setEditing({ row: rowIndex(), column: item().column, text: cellText(value()), original: value() }) } }}>
                   <Show when={active()} fallback={
                     <Show when={json()} fallback={<span class={isStatus() ? `status-pill ${text().toLowerCase()}` : ''}>{formatCell(value())}</span>}>
                       <button class="json-cell" title={JSON.stringify(JSON.parse(json()!))} onClick={() => setJsonCell({ row: rowIndex(), column: item().column, value: value() })}><Code size={13}/><span class="json-preview">{JSON.stringify(JSON.parse(json()!))}</span></button>

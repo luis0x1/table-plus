@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	sqldriver "database/sql/driver"
 	"errors"
 	"fmt"
 	"net"
@@ -46,9 +47,10 @@ type App struct {
 	name             string
 	driver           string
 	readOnly         bool
+	previewMu        sync.Mutex
+	previewFiles     map[string]previewedFile
 	operationsMu     sync.Mutex
 	operations       map[string]*runningOperation
-	cancelledOps     map[string]struct{}
 }
 
 type runningOperation struct {
@@ -81,6 +83,10 @@ type PostgresConfig struct {
 	Password       string `json:"password"`
 	Database       string `json:"database"`
 	SSLMode        string `json:"sslMode"`
+	SSLRootCert    string `json:"sslRootCert"`
+	SSLClientCert  string `json:"sslClientCert"`
+	SSLClientKey   string `json:"sslClientKey"`
+	TLSServerName  string `json:"tlsServerName"`
 	ReadOnly       bool   `json:"readOnly"`
 	SaveConnection bool   `json:"saveConnection"`
 	SavePassword   bool   `json:"savePassword"`
@@ -118,12 +124,20 @@ type QueryResult struct {
 	Message      string   `json:"message"`
 }
 
+// WireValue carries database scalars that JSON cannot represent losslessly.
+// JavaScript numbers cannot distinguish adjacent int64 primary keys above 2^53,
+// so their decimal representation stays a string end to end.
+type WireValue struct {
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
 func NewApp() *App {
 	return &App{
 		profilesMu:   &sync.Mutex{},
 		sessions:     make(map[string]*App),
 		operations:   make(map[string]*runningOperation),
-		cancelledOps: make(map[string]struct{}),
+		previewFiles: make(map[string]previewedFile),
 	}
 }
 
@@ -230,6 +244,10 @@ func normalizePostgresConfig(input PostgresConfig) (PostgresConfig, error) {
 	input.User = strings.TrimSpace(input.User)
 	input.Database = strings.TrimSpace(input.Database)
 	input.SSLMode = strings.ToLower(strings.TrimSpace(input.SSLMode))
+	input.SSLRootCert = strings.TrimSpace(input.SSLRootCert)
+	input.SSLClientCert = strings.TrimSpace(input.SSLClientCert)
+	input.SSLClientKey = strings.TrimSpace(input.SSLClientKey)
+	input.TLSServerName = strings.TrimSpace(input.TLSServerName)
 	if input.Host == "" || input.User == "" || input.Database == "" {
 		return PostgresConfig{}, errors.New("host, user, and database are required")
 	}
@@ -240,14 +258,33 @@ func normalizePostgresConfig(input PostgresConfig) (PostgresConfig, error) {
 		return PostgresConfig{}, errors.New("port must be between 1 and 65535")
 	}
 	if input.SSLMode == "" {
-		input.SSLMode = "prefer"
+		if isLocalPostgresHost(input.Host) {
+			input.SSLMode = "prefer"
+		} else {
+			input.SSLMode = "verify-full"
+		}
 	}
 	sslModes := map[string]bool{"disable": true, "allow": true, "prefer": true, "require": true, "verify-ca": true, "verify-full": true}
 	if !sslModes[input.SSLMode] {
 		return PostgresConfig{}, errors.New("invalid SSL mode")
 	}
+	if (input.SSLClientCert == "") != (input.SSLClientKey == "") {
+		return PostgresConfig{}, errors.New("SSL client certificate and key must be provided together")
+	}
+	if input.SSLMode == "disable" && (input.SSLRootCert != "" || input.SSLClientCert != "" || input.TLSServerName != "") {
+		return PostgresConfig{}, errors.New("SSL certificate settings require SSL to be enabled")
+	}
 
 	return input, nil
+}
+
+func isLocalPostgresHost(host string) bool {
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if strings.EqualFold(host, "localhost") || strings.HasPrefix(host, "/") {
+		return true
+	}
+	address := net.ParseIP(host)
+	return address != nil && address.IsLoopback()
 }
 
 func openPostgresDB(input PostgresConfig) (*sql.DB, error) {
@@ -259,6 +296,13 @@ func openPostgresDB(input PostgresConfig) (*sql.DB, error) {
 	}
 	query := endpoint.Query()
 	query.Set("sslmode", input.SSLMode)
+	if input.SSLRootCert != "" {
+		query.Set("sslrootcert", input.SSLRootCert)
+	}
+	if input.SSLClientCert != "" {
+		query.Set("sslcert", input.SSLClientCert)
+		query.Set("sslkey", input.SSLClientKey)
+	}
 	endpoint.RawQuery = query.Encode()
 	config, err := pgx.ParseConfig(endpoint.String())
 	if err != nil {
@@ -266,6 +310,16 @@ func openPostgresDB(input PostgresConfig) (*sql.DB, error) {
 	}
 	if input.ReadOnly {
 		config.RuntimeParams["default_transaction_read_only"] = "on"
+	}
+	if input.TLSServerName != "" {
+		if config.TLSConfig != nil {
+			config.TLSConfig.ServerName = input.TLSServerName
+		}
+		for _, fallback := range config.Fallbacks {
+			if fallback.TLSConfig != nil {
+				fallback.TLSConfig.ServerName = input.TLSServerName
+			}
+		}
 	}
 	db := stdlib.OpenDB(*config)
 	db.SetMaxOpenConns(4)
@@ -374,16 +428,11 @@ func (a *App) beginOperation(id string) (context.Context, func()) {
 	}
 	operation := &runningOperation{cancel: cancel}
 	a.operationsMu.Lock()
-	_, cancelled := a.cancelledOps[id]
-	delete(a.cancelledOps, id)
 	if previous := a.operations[id]; previous != nil {
 		previous.cancel()
 	}
 	a.operations[id] = operation
 	a.operationsMu.Unlock()
-	if cancelled {
-		cancel()
-	}
 	return ctx, func() {
 		cancel()
 		a.operationsMu.Lock()
@@ -397,12 +446,9 @@ func (a *App) beginOperation(id string) (context.Context, func()) {
 func (a *App) CancelOperation(id string) bool {
 	a.operationsMu.Lock()
 	operation := a.operations[id]
-	if operation == nil && id != "" {
-		a.cancelledOps[id] = struct{}{}
-	}
 	a.operationsMu.Unlock()
 	if operation == nil {
-		return id != ""
+		return false
 	}
 	operation.cancel()
 	return true
@@ -412,7 +458,6 @@ func (a *App) cancelAllOperations() {
 	a.operationsMu.Lock()
 	operations := a.operations
 	a.operations = make(map[string]*runningOperation)
-	a.cancelledOps = make(map[string]struct{})
 	a.operationsMu.Unlock()
 	for _, operation := range operations {
 		operation.cancel()
@@ -655,9 +700,6 @@ func (a *App) executeScriptStatement(ctx context.Context, query string) (QueryRe
 	}
 	keyword := strings.ToLower(match[1])
 	if a.GetStatus().ReadOnly {
-		if !readOnlyStatementAllowed(keyword, driver) {
-			return QueryResult{}, errors.New("this database connection is read-only")
-		}
 		return a.executeQuery(ctx, query)
 	}
 	if scriptStatementReturnsRows(keyword, query, driver) {
@@ -711,11 +753,8 @@ func scriptStatementReturnsRows(keyword, query, driver string) bool {
 	}
 }
 
-func readOnlyStatementAllowed(keyword, driver string) bool {
-	if keyword == "select" || keyword == "with" || keyword == "explain" {
-		return true
-	}
-	return keyword == "pragma" && driver == driverSQLite
+func readOnlyStatementAllowed(keyword string) bool {
+	return keyword == "select"
 }
 
 func (a *App) executeQuery(ctx context.Context, query string) (QueryResult, error) {
@@ -728,12 +767,41 @@ func (a *App) executeQuery(ctx context.Context, query string) (QueryResult, erro
 	if query == "" {
 		return QueryResult{}, errors.New("query is empty")
 	}
-	match := leadingKeyword.FindStringSubmatch(query)
-	if len(match) < 2 {
-		return QueryResult{}, errors.New("unable to parse query")
+	operation, err := consoleStatementOperation(query)
+	if err != nil {
+		return QueryResult{}, err
 	}
-	if !readOnlyStatementAllowed(strings.ToLower(match[1]), driver) {
-		return QueryResult{}, errors.New("read-only mode only allows SELECT, WITH, and EXPLAIN queries")
+	if !readOnlyStatementAllowed(operation) {
+		return QueryResult{}, errors.New("read-only mode only allows a single SELECT query")
+	}
+	if driver == driverSQLite {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return QueryResult{}, err
+		}
+		if _, err := conn.ExecContext(ctx, `PRAGMA query_only = ON`); err != nil {
+			_ = conn.Close()
+			return QueryResult{}, fmt.Errorf("enable SQLite query-only mode: %w", err)
+		}
+		defer func() {
+			if _, resetErr := conn.ExecContext(context.Background(), `PRAGMA query_only = OFF`); resetErr != nil {
+				_ = conn.Raw(func(any) error { return sqldriver.ErrBadConn })
+			}
+			_ = conn.Close()
+		}()
+		rows, err := conn.QueryContext(ctx, query)
+		if err != nil {
+			return QueryResult{}, err
+		}
+		defer rows.Close()
+		data, err := scanRowsLimited(rows, 1000)
+		if err != nil {
+			return QueryResult{}, err
+		}
+		if err := rows.Close(); err != nil {
+			return QueryResult{}, err
+		}
+		return QueryResult{Columns: data.Columns, Rows: data.Rows, RowsAffected: int64(len(data.Rows)), DurationMs: time.Since(started).Milliseconds(), Message: fmt.Sprintf("Returned %d row(s)", len(data.Rows))}, nil
 	}
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
@@ -750,9 +818,6 @@ func (a *App) executeQuery(ctx context.Context, query string) (QueryResult, erro
 		return QueryResult{}, err
 	}
 	if err := rows.Close(); err != nil {
-		return QueryResult{}, err
-	}
-	if err := tx.Commit(); err != nil {
 		return QueryResult{}, err
 	}
 	return QueryResult{Columns: data.Columns, Rows: data.Rows, RowsAffected: int64(len(data.Rows)), DurationMs: time.Since(started).Milliseconds(), Message: fmt.Sprintf("Returned %d row(s)", len(data.Rows))}, nil
@@ -775,7 +840,7 @@ func ensureTable(db *sql.DB, driver, schema, table string) error {
 func quoteIdentifier(value string) string { return `"` + strings.ReplaceAll(value, `"`, `""`) + `"` }
 
 func qualifiedIdentifier(schema, table string) string {
-	if schema == "" || schema == "main" {
+	if schema == "" {
 		return quoteIdentifier(table)
 	}
 	return quoteIdentifier(schema) + "." + quoteIdentifier(table)
@@ -972,6 +1037,7 @@ func scanRowsLimited(rows *sql.Rows, max int) (TableData, error) {
 		return TableData{}, err
 	}
 	result := TableData{Columns: columns, Rows: make([][]any, 0)}
+	resultBytes := 0
 	for rows.Next() {
 		if len(result.Rows) >= max {
 			break
@@ -985,8 +1051,23 @@ func scanRowsLimited(rows *sql.Rows, max int) (TableData, error) {
 			return TableData{}, err
 		}
 		for i, value := range values {
-			if bytes, ok := value.([]byte); ok {
-				values[i] = string(bytes)
+			switch value := value.(type) {
+			case []byte:
+				if len(value) > maxResultCellBytes || resultBytes+len(value) > maxResultBytes {
+					return TableData{}, errors.New("query result exceeds the configured byte budget")
+				}
+				resultBytes += len(value)
+				values[i] = string(value)
+			case string:
+				if len(value) > maxResultCellBytes || resultBytes+len(value) > maxResultBytes {
+					return TableData{}, errors.New("query result exceeds the configured byte budget")
+				}
+				resultBytes += len(value)
+			case int64:
+				const maxSafeJavaScriptInteger = int64(1<<53 - 1)
+				if value > maxSafeJavaScriptInteger || value < -maxSafeJavaScriptInteger {
+					values[i] = WireValue{Type: "int64", Value: strconv.FormatInt(value, 10)}
+				}
 			}
 		}
 		result.Rows = append(result.Rows, values)

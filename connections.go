@@ -16,32 +16,40 @@ import (
 const keyringService = "QueryNest"
 
 type SavedConnection struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Driver      string `json:"driver"`
-	Path        string `json:"path,omitempty"`
-	Host        string `json:"host,omitempty"`
-	Port        int    `json:"port,omitempty"`
-	User        string `json:"user,omitempty"`
-	Database    string `json:"database,omitempty"`
-	SSLMode     string `json:"sslMode,omitempty"`
-	ReadOnly    bool   `json:"readOnly"`
-	HasPassword bool   `json:"hasPassword"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Driver        string `json:"driver"`
+	Path          string `json:"path,omitempty"`
+	Host          string `json:"host,omitempty"`
+	Port          int    `json:"port,omitempty"`
+	User          string `json:"user,omitempty"`
+	Database      string `json:"database,omitempty"`
+	SSLMode       string `json:"sslMode,omitempty"`
+	SSLRootCert   string `json:"sslRootCert,omitempty"`
+	SSLClientCert string `json:"sslClientCert,omitempty"`
+	SSLClientKey  string `json:"sslClientKey,omitempty"`
+	TLSServerName string `json:"tlsServerName,omitempty"`
+	ReadOnly      bool   `json:"readOnly"`
+	HasPassword   bool   `json:"hasPassword"`
 }
 
 type SavedConnectionUpdate struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Driver       string `json:"driver"`
-	Path         string `json:"path,omitempty"`
-	Host         string `json:"host,omitempty"`
-	Port         int    `json:"port,omitempty"`
-	User         string `json:"user,omitempty"`
-	Password     string `json:"password,omitempty"`
-	Database     string `json:"database,omitempty"`
-	SSLMode      string `json:"sslMode,omitempty"`
-	ReadOnly     bool   `json:"readOnly"`
-	SavePassword bool   `json:"savePassword"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Driver        string `json:"driver"`
+	Path          string `json:"path,omitempty"`
+	Host          string `json:"host,omitempty"`
+	Port          int    `json:"port,omitempty"`
+	User          string `json:"user,omitempty"`
+	Password      string `json:"password,omitempty"`
+	Database      string `json:"database,omitempty"`
+	SSLMode       string `json:"sslMode,omitempty"`
+	SSLRootCert   string `json:"sslRootCert,omitempty"`
+	SSLClientCert string `json:"sslClientCert,omitempty"`
+	SSLClientKey  string `json:"sslClientKey,omitempty"`
+	TLSServerName string `json:"tlsServerName,omitempty"`
+	ReadOnly      bool   `json:"readOnly"`
+	SavePassword  bool   `json:"savePassword"`
 }
 
 func (a *App) ListSavedConnections() ([]SavedConnection, error) {
@@ -74,7 +82,9 @@ func (a *App) ConnectSavedConnection(id, password string) (ConnectionStatus, err
 		return a.ConnectPostgres(PostgresConfig{
 			ID: profile.ID, Name: profile.Name, Host: profile.Host, Port: profile.Port,
 			User: profile.User, Password: password, Database: profile.Database,
-			SSLMode: profile.SSLMode, ReadOnly: profile.ReadOnly,
+			SSLMode: profile.SSLMode, SSLRootCert: profile.SSLRootCert,
+			SSLClientCert: profile.SSLClientCert, SSLClientKey: profile.SSLClientKey,
+			TLSServerName: profile.TLSServerName, ReadOnly: profile.ReadOnly,
 		})
 	}
 	return ConnectionStatus{}, errors.New("saved connection not found")
@@ -186,7 +196,9 @@ func (a *App) UpdateSavedConnection(input SavedConnectionUpdate) error {
 	case driverPostgres:
 		normalized, err := normalizePostgresConfig(PostgresConfig{
 			Name: input.Name, Host: input.Host, Port: input.Port, User: input.User,
-			Database: input.Database, SSLMode: input.SSLMode, ReadOnly: input.ReadOnly,
+			Database: input.Database, SSLMode: input.SSLMode, SSLRootCert: input.SSLRootCert,
+			SSLClientCert: input.SSLClientCert, SSLClientKey: input.SSLClientKey,
+			TLSServerName: input.TLSServerName, ReadOnly: input.ReadOnly,
 		})
 		if err != nil {
 			return err
@@ -212,7 +224,9 @@ func (a *App) UpdateSavedConnection(input SavedConnectionUpdate) error {
 		profiles[index] = SavedConnection{
 			ID: current.ID, Name: name, Driver: driverPostgres, Host: normalized.Host,
 			Port: normalized.Port, User: normalized.User, Database: normalized.Database,
-			SSLMode: normalized.SSLMode, ReadOnly: normalized.ReadOnly, HasPassword: hasPassword,
+			SSLMode: normalized.SSLMode, SSLRootCert: normalized.SSLRootCert,
+			SSLClientCert: normalized.SSLClientCert, SSLClientKey: normalized.SSLClientKey,
+			TLSServerName: normalized.TLSServerName, ReadOnly: normalized.ReadOnly, HasPassword: hasPassword,
 		}
 	default:
 		return errors.New("unsupported saved connection driver")
@@ -251,7 +265,13 @@ func (a *App) savePostgresProfile(input PostgresConfig) error {
 	if name == "" {
 		name = input.Database
 	}
-	profile := SavedConnection{ID: id, Name: name, Driver: driverPostgres, Host: input.Host, Port: input.Port, User: input.User, Database: input.Database, SSLMode: input.SSLMode, ReadOnly: input.ReadOnly}
+	profile := SavedConnection{
+		ID: id, Name: name, Driver: driverPostgres, Host: input.Host, Port: input.Port,
+		User: input.User, Database: input.Database, SSLMode: input.SSLMode,
+		SSLRootCert: input.SSLRootCert, SSLClientCert: input.SSLClientCert,
+		SSLClientKey: input.SSLClientKey, TLSServerName: input.TLSServerName,
+		ReadOnly: input.ReadOnly,
+	}
 	if input.SavePassword && input.Password != "" {
 		if err := keyring.Set(keyringService, id, input.Password); err != nil {
 			return fmt.Errorf("store password in system credential manager: %w", err)

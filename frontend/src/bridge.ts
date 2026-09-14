@@ -31,11 +31,11 @@ type Backend = {
   SessionPreviewDatabaseBackup(id: string): Promise<TransferPreview>
   SessionBackupDatabase(id: string, batchSizeMB: number): Promise<TransferResult>
   SessionChooseRestoreBackup(id: string): Promise<TransferPreview>
-  SessionRestoreDatabase(id: string, path: string): Promise<TransferResult>
+  SessionRestoreDatabase(id: string, token: string, restoreCode: boolean): Promise<TransferResult>
   SessionPreviewTableExport(id: string, tables: TableRef[]): Promise<TransferPreview>
   SessionExportTables(id: string, tables: TableRef[], format: string): Promise<TransferResult>
   SessionChooseTableImport(id: string, table: TableRef): Promise<TransferPreview>
-  SessionImportTable(id: string, table: TableRef, path: string, conflict: string): Promise<TransferResult>
+  SessionImportTable(id: string, table: TableRef, token: string, conflict: string): Promise<TransferResult>
   SessionTruncateTables(id: string, tables: TableRef[]): Promise<number>
   SessionTruncateTablesTracked(id: string, operationID: string, tables: TableRef[]): Promise<number>
   SessionScriptWorkspacePath(id: string): Promise<string>
@@ -203,7 +203,7 @@ const mock: Backend = {
   async SessionPreviewDatabaseBackup(id) { const session = mockSession(id); const tables = await this.ListTables(); return { kind: 'backup', path: '', format: '', driver: session.driver, database: session.database, tables: await Promise.all(tables.filter(table => table.type === 'table').map(async table => { const data = await this.GetTableData(table.schema, table.name, 5, 0, '', '', ''); return { schema: table.schema, name: table.name, columns: data.columns, targetColumns: [], missingColumns: [], extraColumns: [], requiredMissing: [], sampleRows: data.rows, rows: data.total } })) } },
   async SessionBackupDatabase() { return { path: 'preview.qnb', tables: 2, rows: 13, skipped: 0 } },
   async SessionChooseRestoreBackup() { throw new Error('File selection is available in the desktop app.') },
-  async SessionRestoreDatabase(_id, path) { return path.toLowerCase().endsWith('.sql') ? { path, tables: 2, rows: 13, skipped: 0, statements: 8 } : { path: 'preview.qnb', tables: 2, rows: 13, skipped: 0 } },
+  async SessionRestoreDatabase(_id, _token, _restoreCode) { return { path: 'preview.qnb', tables: 2, rows: 13, skipped: 0 } },
   async SessionPreviewTableExport(id, tables) { const session = mockSession(id); return { kind: 'export', path: '', format: '', driver: session.driver, database: session.database, tables: await Promise.all(tables.map(async table => { const data = await this.GetTableData(table.schema, table.name, 5, 0, '', '', ''); return { schema: table.schema, name: table.name, columns: data.columns, targetColumns: [], missingColumns: [], extraColumns: [], requiredMissing: [], sampleRows: data.rows, rows: data.total } })) } },
   async SessionExportTables(_id, tables) { return { path: 'preview.json', tables: tables.length, rows: 0, skipped: 0 } },
   async SessionChooseTableImport() { throw new Error('File selection is available in the desktop app.') },
@@ -333,11 +333,11 @@ export function databaseApi(id: string) {
     PreviewDatabaseBackup: () => backend.SessionPreviewDatabaseBackup(id),
     BackupDatabase: (batchSizeMB: number) => backend.SessionBackupDatabase(id, batchSizeMB),
     ChooseRestoreBackup: () => backend.SessionChooseRestoreBackup(id),
-    RestoreDatabase: (path: string) => backend.SessionRestoreDatabase(id, path),
+    RestoreDatabase: (token: string, restoreCode: boolean) => backend.SessionRestoreDatabase(id, token, restoreCode),
     PreviewTableExport: (tables: TableRef[]) => backend.SessionPreviewTableExport(id, tables),
     ExportTables: (tables: TableRef[], format: string) => backend.SessionExportTables(id, tables, format),
     ChooseTableImport: (table: TableRef) => backend.SessionChooseTableImport(id, table),
-    ImportTable: (table: TableRef, path: string, conflict: string) => backend.SessionImportTable(id, table, path, conflict),
+    ImportTable: (table: TableRef, token: string, conflict: string) => backend.SessionImportTable(id, table, token, conflict),
     TruncateTables: (operationID: string, tables: TableRef[]) => backend.SessionTruncateTablesTracked(id, operationID, tables),
     ScriptWorkspacePath: () => backend.SessionScriptWorkspacePath(id),
     ListScripts: () => backend.SessionListScripts(id),
