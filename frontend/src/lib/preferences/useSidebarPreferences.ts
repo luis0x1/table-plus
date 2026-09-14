@@ -1,10 +1,15 @@
 import { createEffect, createSignal, onCleanup, onMount } from 'solid-js'
-import { api } from './bridge'
-import type { AppearancePreferences, EditingPreferences, SidebarPreferences, TransferPreferences } from './types'
+import { api } from '../backend/bridge'
+import type { AppearancePreferences, EditingPreferences, SidebarPreferences, TransferPreferences } from '../../types'
 
 export const DEFAULT_APPEARANCE: AppearancePreferences = { fontSize: 17, fontFamily: 'system' }
 export const DEFAULT_TRANSFER: TransferPreferences = { backupBatchSizeMB: 500 }
-export const DEFAULT_EDITING: EditingPreferences = { undoHistoryLimit: 100, caretWidth: 2, editorFontSize: 12, editorFontFamily: 'mono' }
+export const DEFAULT_EDITING: EditingPreferences = {
+  undoHistoryLimit: 100,
+  caretWidth: 2,
+  editorFontSize: 12,
+  editorFontFamily: 'mono',
+}
 export const UNDO_HISTORY_RANGE = { min: 10, max: 1000 }
 export const CARET_WIDTH_RANGE = { min: 1, max: 4 }
 export const EDITOR_FONT_SIZE_RANGE = { min: 10, max: 24 }
@@ -26,7 +31,9 @@ function legacyPreferences(): SidebarPreferences {
     try {
       const value = Number(localStorage.getItem(`querynest:sidebar:${key}`) ?? 1)
       return Number.isFinite(value) ? Math.max(1, Math.min(2, value)) : 1
-    } catch { return 1 }
+    } catch {
+      return 1
+    }
   }
   return { databases: read('databases'), tables: read('tables') }
 }
@@ -42,18 +49,23 @@ export default function useSidebarPreferences(onError: (message: string) => void
 
   onMount(() => {
     let cancelled = false
-    onCleanup(() => { cancelled = true })
-    api().LoadAppConfig(latest).then(config => {
-      if (cancelled) return
-      latest = config.sidebars
-      setValues(config.sidebars)
-      setAppearanceState(config.appearance)
-      setTransferState(config.transfer)
-      setEditingState(config.editing)
-      setReady(true)
-    }).catch(error => {
-      if (!cancelled) onError(`Could not load application settings: ${String(error)}`)
+    onCleanup(() => {
+      cancelled = true
     })
+    api()
+      .LoadAppConfig(latest)
+      .then((config) => {
+        if (cancelled) return
+        latest = config.sidebars
+        setValues(config.sidebars)
+        setAppearanceState(config.appearance)
+        setTransferState(config.transfer)
+        setEditingState(config.editing)
+        setReady(true)
+      })
+      .catch((error) => {
+        if (!cancelled) onError(`Could not load application settings: ${String(error)}`)
+      })
   })
 
   createEffect(() => {
@@ -66,7 +78,10 @@ export default function useSidebarPreferences(onError: (message: string) => void
     const current = editing()
     document.documentElement.style.setProperty('--editor-caret-width', `${current.caretWidth}px`)
     document.documentElement.style.setProperty('--editor-font-size', `${current.editorFontSize}px`)
-    document.documentElement.style.setProperty('--editor-font-family', quotedFontFamily(current.editorFontFamily, 'monospace'))
+    document.documentElement.style.setProperty(
+      '--editor-font-family',
+      quotedFontFamily(current.editorFontFamily, 'monospace'),
+    )
   })
 
   const setScale = (key: keyof SidebarPreferences, scale: number) => {
@@ -78,9 +93,11 @@ export default function useSidebarPreferences(onError: (message: string) => void
     if (!ready()) return
     const snapshot = { ...latest }
     // Serialize writes so rapid changes cannot save an older size last.
-    saves = saves.then(() => api().SaveSidebarPreferences(snapshot)).catch(error => {
-      onError(`Could not save sidebar settings: ${String(error)}`)
-    })
+    saves = saves
+      .then(() => api().SaveSidebarPreferences(snapshot))
+      .catch((error) => {
+        onError(`Could not save sidebar settings: ${String(error)}`)
+      })
   }
 
   const setAppearance = (next: AppearancePreferences) => {
@@ -90,32 +107,44 @@ export default function useSidebarPreferences(onError: (message: string) => void
     }
     setAppearanceState(normalized)
     if (!ready()) return
-    saves = saves.then(() => api().SaveAppearancePreferences(normalized)).catch(error => {
-      onError(`Could not save appearance settings: ${String(error)}`)
-    })
+    saves = saves
+      .then(() => api().SaveAppearancePreferences(normalized))
+      .catch((error) => {
+        onError(`Could not save appearance settings: ${String(error)}`)
+      })
   }
 
   const setTransfer = (next: TransferPreferences) => {
     const normalized = { backupBatchSizeMB: Math.max(1, Math.min(10240, Math.round(next.backupBatchSizeMB))) }
     setTransferState(normalized)
     if (!ready()) return
-    saves = saves.then(() => api().SaveTransferPreferences(normalized)).catch(error => {
-      onError(`Could not save data operation settings: ${String(error)}`)
-    })
+    saves = saves
+      .then(() => api().SaveTransferPreferences(normalized))
+      .catch((error) => {
+        onError(`Could not save data operation settings: ${String(error)}`)
+      })
   }
 
   const setEditing = (next: EditingPreferences) => {
     const normalized = {
-      undoHistoryLimit: Math.max(UNDO_HISTORY_RANGE.min, Math.min(UNDO_HISTORY_RANGE.max, Math.round(next.undoHistoryLimit))),
+      undoHistoryLimit: Math.max(
+        UNDO_HISTORY_RANGE.min,
+        Math.min(UNDO_HISTORY_RANGE.max, Math.round(next.undoHistoryLimit)),
+      ),
       caretWidth: Math.max(CARET_WIDTH_RANGE.min, Math.min(CARET_WIDTH_RANGE.max, Math.round(next.caretWidth))),
-      editorFontSize: Math.max(EDITOR_FONT_SIZE_RANGE.min, Math.min(EDITOR_FONT_SIZE_RANGE.max, Math.round(next.editorFontSize))),
+      editorFontSize: Math.max(
+        EDITOR_FONT_SIZE_RANGE.min,
+        Math.min(EDITOR_FONT_SIZE_RANGE.max, Math.round(next.editorFontSize)),
+      ),
       editorFontFamily: next.editorFontFamily.trim() || 'mono',
     }
     setEditingState(normalized)
     if (!ready()) return
-    saves = saves.then(() => api().SaveEditingPreferences(normalized)).catch(error => {
-      onError(`Could not save editing settings: ${String(error)}`)
-    })
+    saves = saves
+      .then(() => api().SaveEditingPreferences(normalized))
+      .catch((error) => {
+        onError(`Could not save editing settings: ${String(error)}`)
+      })
   }
 
   return { values, setScale, commit, appearance, setAppearance, transfer, setTransfer, editing, setEditing, ready }

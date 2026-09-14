@@ -1,5 +1,5 @@
 import { createSignal, onCleanup, onMount, createEffect, type JSX } from 'solid-js'
-import { ChevronLeft, ChevronRight } from './icons'
+import { ChevronLeft, ChevronRight } from '../ui/icons'
 
 export default function TabStrip(props: { activeTab: string; children: JSX.Element }) {
   let viewport!: HTMLDivElement
@@ -19,7 +19,7 @@ export default function TabStrip(props: { activeTab: string; children: JSX.Eleme
     const updateEdges = () => {
       const left = viewport.scrollLeft > 1
       const right = viewport.scrollLeft + viewport.clientWidth < viewport.scrollWidth - 1
-      setEdges(current => current.left === left && current.right === right ? current : { left, right })
+      setEdges((current) => (current.left === left && current.right === right ? current : { left, right }))
     }
     const wheel = (event: WheelEvent) => {
       if (event.ctrlKey || viewport.scrollWidth <= viewport.clientWidth) return
@@ -29,7 +29,10 @@ export default function TabStrip(props: { activeTab: string; children: JSX.Eleme
       const scale = event.deltaMode === 1 ? 32 : event.deltaMode === 2 ? viewport.clientWidth : 1
       viewport.scrollLeft += delta * scale
     }
-    const resize = new ResizeObserver(() => { revealActiveTab(); updateEdges() })
+    const resize = new ResizeObserver(() => {
+      revealActiveTab()
+      updateEdges()
+    })
     resize.observe(viewport)
     resize.observe(content)
     viewport.addEventListener('scroll', updateEdges)
@@ -49,15 +52,42 @@ export default function TabStrip(props: { activeTab: string; children: JSX.Eleme
 
   function scroll(direction: -1 | 1) {
     if (!viewport) return
-    viewport.scrollBy({ left: direction * Math.max(160, viewport.clientWidth * 0.75), behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
+    viewport.scrollBy({
+      left: direction * Math.max(160, viewport.clientWidth * 0.75),
+      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+    })
   }
 
   const overflowing = () => edges().left || edges().right
-  return <div class="tab-strip">
-    {overflowing() && <button class="icon-button tab-scroll-button" aria-label="Scroll tabs left" title="Scroll tabs left" disabled={!edges().left} onClick={() => scroll(-1)}><ChevronLeft size={15}/></button>}
-    <div class="tabs-scroll" ref={viewport}>
-      <div class="tabs-content" ref={content}>{props.children}</div>
+  return (
+    <div class="tab-strip">
+      {overflowing() && (
+        <button
+          class="icon-button tab-scroll-button"
+          aria-label="Scroll tabs left"
+          title="Scroll tabs left"
+          disabled={!edges().left}
+          onClick={() => scroll(-1)}
+        >
+          <ChevronLeft size={15} />
+        </button>
+      )}
+      <div class="tabs-scroll" ref={viewport}>
+        <div class="tabs-content" ref={content}>
+          {props.children}
+        </div>
+      </div>
+      {overflowing() && (
+        <button
+          class="icon-button tab-scroll-button"
+          aria-label="Scroll tabs right"
+          title="Scroll tabs right"
+          disabled={!edges().right}
+          onClick={() => scroll(1)}
+        >
+          <ChevronRight size={15} />
+        </button>
+      )}
     </div>
-    {overflowing() && <button class="icon-button tab-scroll-button" aria-label="Scroll tabs right" title="Scroll tabs right" disabled={!edges().right} onClick={() => scroll(1)}><ChevronRight size={15}/></button>}
-  </div>
+  )
 }

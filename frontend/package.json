@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",
@@ -21,6 +23,7 @@
   },
   "devDependencies": {
     "@material-symbols-svg/react": "^0.14.0",
+    "prettier": "^3.9.6",
     "typescript": "^5.9.2",
     "vite": "^7.1.4",
     "vite-plugin-solid": "^2.11.14"

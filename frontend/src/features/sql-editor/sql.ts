@@ -10,19 +10,129 @@ export type SqlToken = { type: SqlTokenType; start: number; end: number }
 export type SqlStatement = { start: number; end: number; body: string }
 
 const KEYWORDS = new Set([
-  'abort', 'add', 'all', 'alter', 'analyze', 'and', 'as', 'asc', 'attach', 'begin', 'between', 'by',
-  'cascade', 'case', 'cast', 'check', 'collate', 'column', 'commit', 'conflict', 'constraint', 'create',
-  'cross', 'current_date', 'current_time', 'current_timestamp', 'database', 'default', 'deferrable',
-  'delete', 'desc', 'distinct', 'do', 'drop', 'else', 'end', 'escape', 'except', 'exists', 'explain',
-  'filter', 'first', 'following', 'for', 'foreign', 'from', 'full', 'generated', 'group', 'having',
-  'if', 'ignore', 'immediate', 'in', 'index', 'inner', 'insert', 'instead', 'intersect', 'into', 'is',
-  'isnull', 'join', 'key', 'last', 'left', 'like', 'limit', 'materialized', 'natural', 'no', 'not',
-  'nothing', 'notnull', 'null', 'nulls', 'of', 'offset', 'on', 'or', 'order', 'outer', 'over',
-  'partition', 'pragma', 'primary', 'procedure', 'range', 'recursive', 'references', 'reindex',
-  'release', 'rename', 'replace', 'restrict', 'returning', 'right', 'rollback', 'row', 'rows',
-  'savepoint', 'select', 'set', 'table', 'temp', 'temporary', 'then', 'to', 'transaction', 'trigger',
-  'union', 'unique', 'update', 'using', 'vacuum', 'values', 'view', 'virtual', 'when', 'where',
-  'window', 'with', 'without',
+  'abort',
+  'add',
+  'all',
+  'alter',
+  'analyze',
+  'and',
+  'as',
+  'asc',
+  'attach',
+  'begin',
+  'between',
+  'by',
+  'cascade',
+  'case',
+  'cast',
+  'check',
+  'collate',
+  'column',
+  'commit',
+  'conflict',
+  'constraint',
+  'create',
+  'cross',
+  'current_date',
+  'current_time',
+  'current_timestamp',
+  'database',
+  'default',
+  'deferrable',
+  'delete',
+  'desc',
+  'distinct',
+  'do',
+  'drop',
+  'else',
+  'end',
+  'escape',
+  'except',
+  'exists',
+  'explain',
+  'filter',
+  'first',
+  'following',
+  'for',
+  'foreign',
+  'from',
+  'full',
+  'generated',
+  'group',
+  'having',
+  'if',
+  'ignore',
+  'immediate',
+  'in',
+  'index',
+  'inner',
+  'insert',
+  'instead',
+  'intersect',
+  'into',
+  'is',
+  'isnull',
+  'join',
+  'key',
+  'last',
+  'left',
+  'like',
+  'limit',
+  'materialized',
+  'natural',
+  'no',
+  'not',
+  'nothing',
+  'notnull',
+  'null',
+  'nulls',
+  'of',
+  'offset',
+  'on',
+  'or',
+  'order',
+  'outer',
+  'over',
+  'partition',
+  'pragma',
+  'primary',
+  'procedure',
+  'range',
+  'recursive',
+  'references',
+  'reindex',
+  'release',
+  'rename',
+  'replace',
+  'restrict',
+  'returning',
+  'right',
+  'rollback',
+  'row',
+  'rows',
+  'savepoint',
+  'select',
+  'set',
+  'table',
+  'temp',
+  'temporary',
+  'then',
+  'to',
+  'transaction',
+  'trigger',
+  'union',
+  'unique',
+  'update',
+  'using',
+  'vacuum',
+  'values',
+  'view',
+  'virtual',
+  'when',
+  'where',
+  'window',
+  'with',
+  'without',
 ])
 
 const identifierStart = /[A-Za-z_]/
@@ -63,7 +173,8 @@ export function scanSql(text: string): { tokens: SqlToken[]; statements: SqlStat
   }
 
   const closeStatement = (end: number) => {
-    if (statementStart >= 0 && hasCode) statements.push({ start: statementStart, end, body: text.slice(statementStart, end) })
+    if (statementStart >= 0 && hasCode)
+      statements.push({ start: statementStart, end, body: text.slice(statementStart, end) })
     statementStart = -1
     hasCode = false
     beginDepth = 0
@@ -72,7 +183,10 @@ export function scanSql(text: string): { tokens: SqlToken[]; statements: SqlStat
   while (index < text.length) {
     const char = text[index]
 
-    if (whitespace.test(char)) { index++; continue }
+    if (whitespace.test(char)) {
+      index++
+      continue
+    }
 
     if (char === '-' && text[index + 1] === '-') {
       const newline = text.indexOf('\n', index)
@@ -103,7 +217,10 @@ export function scanSql(text: string): { tokens: SqlToken[]; statements: SqlStat
       let end = index + 1
       while (end < text.length) {
         if (text[end] === "'") {
-          if (text[end + 1] === "'") { end += 2; continue }
+          if (text[end + 1] === "'") {
+            end += 2
+            continue
+          }
           end++
           break
         }
@@ -119,7 +236,10 @@ export function scanSql(text: string): { tokens: SqlToken[]; statements: SqlStat
       let end = index + 1
       while (end < text.length) {
         if (text[end] === closer) {
-          if (closer !== ']' && text[end + 1] === closer) { end += 2; continue }
+          if (closer !== ']' && text[end + 1] === closer) {
+            end += 2
+            continue
+          }
           end++
           break
         }
@@ -148,7 +268,8 @@ export function scanSql(text: string): { tokens: SqlToken[]; statements: SqlStat
       while (end < text.length && identifierPart.test(text[end])) end++
       const word = text.slice(index, end).toLowerCase()
       const keyword = KEYWORDS.has(word)
-      if (keyword && word === 'begin' && statementStart >= 0 && triggerHeader.test(text.slice(statementStart, index))) beginDepth++
+      if (keyword && word === 'begin' && statementStart >= 0 && triggerHeader.test(text.slice(statementStart, index)))
+        beginDepth++
       else if (keyword && word === 'end' && beginDepth > 0) beginDepth--
       push(keyword ? 'keyword' : 'plain', index, end)
       index = end
@@ -175,29 +296,34 @@ export function scanSql(text: string): { tokens: SqlToken[]; statements: SqlStat
  * statement it touches; a plain cursor runs the statement it sits in, or the
  * nearest one when it sits between them.
  */
-export function statementsInRange(statements: SqlStatement[], selectionStart: number, selectionEnd: number): SqlStatement[] {
+export function statementsInRange(
+  statements: SqlStatement[],
+  selectionStart: number,
+  selectionEnd: number,
+): SqlStatement[] {
   if (!statements.length) return []
   if (selectionEnd > selectionStart) {
-    const touched = statements.filter(statement => statement.start < selectionEnd && statement.end > selectionStart)
+    const touched = statements.filter((statement) => statement.start < selectionEnd && statement.end > selectionStart)
     if (touched.length) return touched
   }
   const caret = selectionStart
-  const containing = statements.find(statement => caret >= statement.start && caret < statement.end)
+  const containing = statements.find((statement) => caret >= statement.start && caret < statement.end)
   if (containing) return [containing]
   let nearest = statements[0]
   let best = Infinity
   for (const statement of statements) {
     const distance = caret < statement.start ? statement.start - caret : caret - statement.end
-    if (distance < best) { best = distance; nearest = statement }
+    if (distance < best) {
+      best = distance
+      nearest = statement
+    }
   }
   return [nearest]
 }
 
 /** summarizeStatement renders the short label the run list shows. */
 export function summarizeStatement(body: string, limit = 46): string {
-  const withoutComments = body
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/--[^\n]*/g, ' ')
+  const withoutComments = body.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ')
   const collapsed = withoutComments.replace(/\s+/g, ' ').replace(/;\s*$/, '').trim()
   if (!collapsed) return '(comment only)'
   return collapsed.length > limit ? collapsed.slice(0, limit - 1).trimEnd() + '…' : collapsed
@@ -230,8 +356,8 @@ const relationKeywords = new Set(['from', 'join', 'into', 'update', 'table'])
  */
 export function tableAliases(statement: string): Record<string, string> {
   const { tokens } = scanSql(statement)
-  const words = tokens.filter(token => token.type === 'keyword' || token.type === 'plain' || token.type === 'quoted')
-  const unquote = (value: string) => /^["`[]/.test(value) ? value.slice(1, -1) : value
+  const words = tokens.filter((token) => token.type === 'keyword' || token.type === 'plain' || token.type === 'quoted')
+  const unquote = (value: string) => (/^["`[]/.test(value) ? value.slice(1, -1) : value)
   const aliases: Record<string, string> = {}
   for (let index = 0; index < words.length; index++) {
     const word = statement.slice(words[index].start, words[index].end).toLowerCase()
@@ -246,7 +372,8 @@ export function tableAliases(statement: string): Record<string, string> {
     }
     aliases[table.toLowerCase()] = table
     let next = words[position + 1]
-    if (next && next.type === 'keyword' && statement.slice(next.start, next.end).toLowerCase() === 'as') next = words[position + 2]
+    if (next && next.type === 'keyword' && statement.slice(next.start, next.end).toLowerCase() === 'as')
+      next = words[position + 2]
     if (next && next.type !== 'keyword') {
       const alias = unquote(statement.slice(next.start, next.end))
       if (alias && !alias.includes('(')) aliases[alias.toLowerCase()] = table
@@ -263,7 +390,7 @@ export function completionContext(text: string, caret: number): CompletionContex
   const { tokens, statements } = scanSql(text)
   // The end of a comment line, and the end of a string still being typed, are
   // both inside it, so the upper bound is inclusive.
-  const enclosing = tokens.find(token => caret > token.start && caret <= token.end)
+  const enclosing = tokens.find((token) => caret > token.start && caret <= token.end)
   if (enclosing && (enclosing.type === 'string' || enclosing.type === 'comment')) return null
 
   let start = caret
@@ -284,11 +411,11 @@ export function completionContext(text: string, caret: number): CompletionContex
   // The last keyword before the word decides whether a relation is expected.
   let wants: CompletionContext['wants'] = qualifier ? 'column' : 'any'
   if (!qualifier) {
-    const previous = [...tokens].reverse().find(token => token.end <= start && token.type === 'keyword')
+    const previous = [...tokens].reverse().find((token) => token.end <= start && token.type === 'keyword')
     if (previous && relationKeywords.has(text.slice(previous.start, previous.end).toLowerCase())) wants = 'table'
   }
 
-  const statement = statements.find(item => caret >= item.start && caret <= item.end)
+  const statement = statements.find((item) => caret >= item.start && caret <= item.end)
   return { prefix, start, end, qualifier, wants, statement }
 }
 
@@ -305,7 +432,7 @@ export function sqlCompletions(context: CompletionContext, tables: CompletionTab
   const aliases = context.statement ? tableAliases(context.statement.body) : {}
   const findTable = (name: string) => {
     const target = (aliases[name.toLowerCase()] ?? name).toLowerCase()
-    return tables.find(table => table.name.toLowerCase() === target)
+    return tables.find((table) => table.name.toLowerCase() === target)
   }
 
   const candidates: Completion[] = []
@@ -317,29 +444,30 @@ export function sqlCompletions(context: CompletionContext, tables: CompletionTab
     if (context.wants !== 'table') {
       // Columns of the tables this statement already mentions come before
       // keywords, because they are what the writer is most likely reaching for.
-      const mentioned = new Set(Object.values(aliases).map(name => name.toLowerCase()))
+      const mentioned = new Set(Object.values(aliases).map((name) => name.toLowerCase()))
       for (const table of tables) {
         if (!mentioned.has(table.name.toLowerCase())) continue
         for (const column of table.columns) candidates.push({ label: column, detail: table.name, kind: 'column' })
       }
-      for (const keyword of KEYWORDS) candidates.push({ label: keyword.toUpperCase(), detail: 'keyword', kind: 'keyword' })
+      for (const keyword of KEYWORDS)
+        candidates.push({ label: keyword.toUpperCase(), detail: 'keyword', kind: 'keyword' })
     }
   }
 
   const order: Record<CompletionKind, number> = { column: 0, table: 1, keyword: 2 }
   const seen = new Set<string>()
   return candidates
-    .map(item => ({ item, score: rank(item.label, context.prefix) }))
-    .filter(entry => entry.score >= 0)
+    .map((item) => ({ item, score: rank(item.label, context.prefix) }))
+    .filter((entry) => entry.score >= 0)
     .sort((a, b) => a.score - b.score || order[a.item.kind] - order[b.item.kind])
-    .filter(entry => {
+    .filter((entry) => {
       const key = `${entry.item.kind}:${entry.item.label.toLowerCase()}`
       if (seen.has(key)) return false
       seen.add(key)
       return true
     })
     .slice(0, limit)
-    .map(entry => entry.item)
+    .map((entry) => entry.item)
 }
 
 export type PaginationPlan = {
@@ -381,12 +509,19 @@ function endsClause(text: string, token: SqlToken | undefined, ...allowedKeyword
  * is; rewriting it would change the result rather than page it.
  */
 export function planPagination(body: string): PaginationPlan {
-  const unusable = (reason: string): PaginationPlan => ({ pageable: false, reason, base: body, userLimit: null, userOffset: 0 })
+  const unusable = (reason: string): PaginationPlan => ({
+    pageable: false,
+    reason,
+    base: body,
+    userLimit: null,
+    userOffset: 0,
+  })
   const { tokens } = scanSql(body)
-  const code = tokens.filter(token => token.type !== 'comment')
+  const code = tokens.filter((token) => token.type !== 'comment')
   const first = code[0]
   if (!first) return unusable('there is nothing to run')
-  if (!pageableLeading.has(body.slice(first.start, first.end).toLowerCase())) return unusable('only SELECT and WITH queries can be paged')
+  if (!pageableLeading.has(body.slice(first.start, first.end).toLowerCase()))
+    return unusable('only SELECT and WITH queries can be paged')
 
   let depth = 0
   let limitAt = -1
@@ -421,7 +556,8 @@ export function planPagination(body: string): PaginationPlan {
       // SQLite's LIMIT <offset>, <count>.
       const skip = readInteger(body, firstValue)
       const take = readInteger(body, secondValue)
-      if (skip === null || take === null || !endsClause(body, code[limitAt + 4], 'offset')) return unusable('this LIMIT is not a plain number')
+      if (skip === null || take === null || !endsClause(body, code[limitAt + 4], 'offset'))
+        return unusable('this LIMIT is not a plain number')
       userOffset = skip
       userLimit = take
       cuts.push({ start: code[limitAt].start, end: secondValue!.end })
@@ -439,7 +575,8 @@ export function planPagination(body: string): PaginationPlan {
     const trailing = code[offsetAt + 2]
     // ROW and ROWS are noise words the standard allows after an OFFSET count.
     const isUnit = Boolean(trailing) && /^rows?$/i.test(body.slice(trailing!.start, trailing!.end))
-    if (skip === null || !endsClause(body, isUnit ? code[offsetAt + 3] : trailing, 'limit')) return unusable('this OFFSET is not a plain number')
+    if (skip === null || !endsClause(body, isUnit ? code[offsetAt + 3] : trailing, 'limit'))
+      return unusable('this OFFSET is not a plain number')
     // An explicit OFFSET wins over the one folded into a comma LIMIT.
     userOffset = skip
     cuts.push({ start: code[offsetAt].start, end: isUnit ? trailing!.end : value!.end })
