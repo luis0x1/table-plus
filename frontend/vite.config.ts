@@ -39,7 +39,8 @@ function materialSymbols(weight: string): Plugin {
 
 export default defineConfig(({ mode }) => {
   const requestedWeight = loadEnv(mode, '.').VITE_ICON_WEIGHT?.trim() || '500'
-  if (!iconWeights.has(requestedWeight)) throw new Error(`VITE_ICON_WEIGHT must be 100, 200, 300, 400, 500, 600, or 700; received ${requestedWeight}`)
+  if (!iconWeights.has(requestedWeight))
+    throw new Error(`VITE_ICON_WEIGHT must be 100, 200, 300, 400, 500, 600, or 700; received ${requestedWeight}`)
   return {
     plugins: [materialSymbols(requestedWeight), solid()],
     build: { outDir: 'dist', emptyOutDir: true },

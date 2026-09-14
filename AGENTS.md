@@ -16,15 +16,16 @@ QueryNest is a TablePlus-inspired desktop database client built with Go, Wails v
 - `transfer.go`: backup, restore, table export and import, plus truncate.
 - `backup_schema.go`: captures the source database's own DDL for a backup and builds the statements that replace it on restore.
 - `app_test.go`: backend and SQL-generation tests.
-- `frontend/src/App.tsx`: main UI, database workspaces, cached table panels, local drafts, unsaved-change guards, and undo/redo history.
-- `frontend/src/sql.ts`: the SQL scanner - tokens, statement boundaries, and which statements a run covers.
-- `frontend/src/SqlEditor.tsx`: the highlighted editor, scope tint and run list.
-- `frontend/src/DataGrid.tsx`: the data grid, windowed row rendering, draft grid construction, column order/resize, cell editing, and the JSON viewer.
-- `frontend/src/bridge.ts`: typed Wails API surface plus browser-preview mocks.
+- `frontend/src/App.tsx`: application shell, open-session orchestration, and global modals.
+- `frontend/src/features/workspace/DatabaseWorkspace.tsx`: database workspaces, cached table panels, local drafts, unsaved-change guards, and undo/redo history.
+- `frontend/src/features/sql-editor/sql.ts`: the SQL scanner - tokens, statement boundaries, and which statements a run covers.
+- `frontend/src/features/sql-editor/SqlEditor.tsx`: the highlighted editor, scope tint and run list.
+- `frontend/src/features/data-grid/DataGrid.tsx`: the data grid, windowed row rendering, draft grid construction, column order/resize, cell editing, and the JSON viewer.
+- `frontend/src/lib/backend/bridge.ts`: typed Wails API surface plus browser-preview mocks.
 - `frontend/src/types.ts`: shared frontend data contracts.
-- `frontend/src/icons.tsx` and `frontend/vite.config.ts`: the Solid Material Symbols component and build-time icon-weight path extraction.
+- `frontend/src/components/ui/icons.tsx` and `frontend/vite.config.ts`: the Solid Material Symbols component and build-time icon-weight path extraction.
 - `frontend/src/solid-jsx.d.ts`: JSX attribute typings Solid does not ship (currently SVG `focusable`).
-- `frontend/src/useSidebarPreferences.ts`: persisted sidebar sizing and appearance state.
+- `frontend/src/lib/preferences/useSidebarPreferences.ts`: persisted sidebar sizing and appearance state.
 - `frontend/src/styles.css`: application and grid styling.
 
 ## Code navigation
@@ -112,7 +113,7 @@ Solid's reactivity is fine-grained: components run once and only the expressions
 
 - Keep Go backend methods small and return errors with useful operation context.
 - Run `gofmt` on changed Go files.
-- Keep frontend API types synchronized between Go bindings, `frontend/src/bridge.ts`, and `frontend/src/types.ts`.
+- Keep frontend API types synchronized between Go bindings, `frontend/src/lib/backend/bridge.ts`, and `frontend/src/types.ts`.
 - Treat the current settings, animation, skeleton, workspace, and tab-cache behavior as product functionality, not optional polish; do not replace `App.tsx` or `styles.css` from an older branch without reconciling these features.
 - Do not edit generated or local-only content in `frontend/dist/`, `frontend/wailsjs/`, `frontend/node_modules/`, `build/bin/`, or `.codegraph/codegraph.db`.
 - Do not overwrite unrelated working-tree changes.

@@ -33,26 +33,31 @@ import ViewColumn from 'virtual:material-symbol/view-column'
 import Visibility from 'virtual:material-symbol/visibility'
 import Warning from 'virtual:material-symbol/warning'
 
-export type IconProps = Omit<JSX.SvgSVGAttributes<SVGSVGElement>, 'viewBox' | 'children'> & { size?: number; title?: string }
+export type IconProps = Omit<JSX.SvgSVGAttributes<SVGSVGElement>, 'viewBox' | 'children'> & {
+  size?: number
+  title?: string
+}
 
 function icon(name: string, path: string) {
   return (props: IconProps) => {
     const [local, rest] = splitProps(props, ['size', 'class', 'title'])
     const size = () => local.size ?? 18
-    return <svg
-      width={size()}
-      height={size()}
-      viewBox="0 -960 960 960"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-      class={['material-symbols', `material-symbols_${name}`, local.class].filter(Boolean).join(' ')}
-      aria-hidden={local.title ? undefined : 'true'}
-      attr:focusable="false"
-      {...rest}
-    >
-      {local.title ? <title>{local.title}</title> : null}
-      <path d={path} fill="currentColor"/>
-    </svg>
+    return (
+      <svg
+        width={size()}
+        height={size()}
+        viewBox="0 -960 960 960"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+        class={['material-symbols', `material-symbols_${name}`, local.class].filter(Boolean).join(' ')}
+        aria-hidden={local.title ? undefined : 'true'}
+        attr:focusable="false"
+        {...rest}
+      >
+        {local.title ? <title>{local.title}</title> : null}
+        <path d={path} fill="currentColor" />
+      </svg>
+    )
   }
 }
 
