@@ -10,9 +10,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// os.Rename cannot replace an existing file on Windows. MoveFileEx provides
-// the replace-existing behavior SaveScript needs while keeping the final swap
-// atomic. Short retries cover transient locks from antivirus and file indexers.
+// os.Rename cannot replace an existing file on Windows. MoveFileEx provides a
+// write-through, replace-existing swap for atomic saves and backup finalization.
+// Short retries cover transient locks from antivirus and file indexers.
 func replaceFile(source, target string) error {
 	sourcePath, err := windows.UTF16PtrFromString(source)
 	if err != nil {
