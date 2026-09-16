@@ -1,26 +1,64 @@
 # QueryNest
 
-QueryNest is a focused desktop database browser inspired by the workflow of TablePlus. It is built with Go, Wails, SolidJS, and TypeScript.
+QueryNest is a focused desktop database client inspired by the workflow of TablePlus. It is built with Go, Wails v2, SolidJS, and TypeScript and currently supports SQLite and PostgreSQL.
 
-The current MVP supports SQLite and PostgreSQL in read-only mode:
+## Features
 
-- Open a local `.db`, `.sqlite`, or `.sqlite3` file
-- Browse tables and views with row counts
-- Inspect columns, data types, nullability, defaults, and primary keys
-- Search all visible columns, sort, and paginate records
-- Keep multiple tables open in tabs
-- Run read-only `SELECT`, `WITH`, `PRAGMA`, and `EXPLAIN` queries
-- Launch a seeded demo database without any setup
-- Connect to PostgreSQL with host, port, database, credentials, and SSL mode
-- Browse PostgreSQL schemas, tables, views, columns, and primary keys
-- Save SQLite and PostgreSQL connection profiles between launches
-- Store PostgreSQL passwords in the operating system credential manager
-- Resize and drag columns; layouts are remembered per database table
-- Double-click cells to edit data safely through primary keys
-- Preview and edit JSON values with validation and formatting
-- Stage row edits in yellow, new rows in green, and deletes/truncates in red
-- Save all staged changes atomically with `Ctrl+S`
-- Warn before closing, refreshing, filtering, sorting, or paging away from unsaved rows
+### Connections and workspaces
+
+- Open local `.db`, `.sqlite`, and `.sqlite3` databases or launch the seeded demo database.
+- Connect to PostgreSQL with host, port, database, SSL options, TLS certificates, and optional read-only mode.
+- Save SQLite and PostgreSQL connection profiles between launches.
+- Keep PostgreSQL passwords out of profile JSON by using the operating system's secure secret storage.
+- Keep multiple databases open as independent workspaces and switch between them without losing table, script, or UI state.
+- Browse PostgreSQL databases from an existing server connection and open them as separate sessions.
+- Cancel running database operations from the application activity UI.
+
+### Browsing and editing data
+
+- Browse schemas, tables, and views with row counts.
+- Inspect columns, types, nullability, defaults, primary keys, and indexes.
+- Search visible columns, sort results, and paginate table data.
+- Keep multiple tables open in tabs while preserving each tab's rows, filter, page, sorting, selection, schema, indexes, and drafts.
+- Resize and reorder data columns; layouts are remembered per database table.
+- Window large query result sets to keep rendering responsive.
+- Double-click cells to edit rows through validated primary-key predicates.
+- Insert and delete rows, truncate tables, and stage mutations locally before touching the database.
+- Preview and edit JSON values with formatting and validation.
+- Highlight staged updates in yellow, inserts in green, and deletes/truncates in red.
+- Undo and redo local grid edits with a configurable history limit.
+- Save the active table's complete draft atomically with `Ctrl+S`.
+- Warn before an action can hide or discard unsaved table changes.
+
+### SQL scripts and query editor
+
+- Run a single `SELECT` from the scratch SQL console; QueryNest enforces the read-only boundary even when the underlying connection is editable.
+- Use saved script tabs for statement-aware SQL execution. Editable connections can run write and DDL statements, while read-only connections restrict script execution to the same single-`SELECT` path as the scratch console.
+- Use SQL syntax highlighting, statement-aware scope highlighting, CodeMirror completion, and search.
+- Resolve statement boundaries across strings, comments, dollar-quoted PostgreSQL bodies, and trigger blocks.
+- Run the statement under the caret or the statements covered by the current selection.
+- Page eligible query results without rewriting nested `LIMIT` or `OFFSET` clauses.
+- Create per-database `.sql` script files that persist under QueryNest application data.
+- Open multiple scripts as tabs, preserving each script's text, saved copy, query results, caret, and undo history.
+- Guard unsaved scripts when closing or deleting them.
+
+### Backup, restore, import, and export
+
+- Back up SQLite and PostgreSQL databases to QueryNest `.qnb` archives using streamed batches and checkpointed pending `.pqnb` files.
+- Archive the source database's own DDL so constraints, indexes, views, triggers, generated columns, enums, routines, and other supported objects can be restored faithfully.
+- Preview backups and surface unsupported SQLite virtual tables before creating the archive.
+- Restore completed `.qnb` backups and SQL dumps.
+- Export one table as CSV or raw CSV, or export one or more tables as JSON.
+- Import CSV and JSON data with a schema/column preview before applying it.
+- Choose whether an import aborts or skips rows when conflicts occur.
+- Select multiple tables for group operations such as export and truncate.
+
+### Desktop experience
+
+- Frameless desktop window with persistent resizable database and table sidebars.
+- Configurable application font, SQL editor font, editor font size, caret width, backup batch size, and undo-history depth.
+- Respect `prefers-reduced-motion` while retaining the application's animation system.
+- Use a browser-only mock backend for frontend development without Wails.
 
 ## Application data
 
@@ -34,7 +72,7 @@ A portable build stores both files in a `data` directory beside the executable. 
 
 The old `~/.querynet/config.json` location is no longer used. A normal desktop build copies valid settings from that file into the new application data directory once when the new `config.json` does not exist.
 
-`config.json` remembers sidebar widths and appearance preferences. Existing browser-stored sidebar widths migrate on the first launch without a config file. Subsequent launches use the file.
+`config.json` remembers sidebar widths, appearance, transfer, and editing preferences. Existing browser-stored sidebar widths migrate on the first launch without a config file. Subsequent launches use the file.
 
 ```json
 {
@@ -42,11 +80,26 @@ The old `~/.querynet/config.json` location is no longer used. A normal desktop b
   "sidebars": {
     "databases": 1,
     "tables": 1
+  },
+  "appearance": {
+    "fontSize": 17,
+    "fontFamily": "system"
+  },
+  "transfer": {
+    "backupBatchSizeMB": 500
+  },
+  "editing": {
+    "undoHistoryLimit": 100,
+    "caretWidth": 2,
+    "editorFontSize": 12,
+    "editorFontFamily": "mono"
   }
 }
 ```
 
 Widths are scales from `1` (default) to `2` (double width), so they adapt to compact windows. Manual file edits take effect after restarting the app. The frontend-only preview uses browser storage.
+
+SQL scripts are stored per database under `<appDataDir>/projects/<hash>`, where the hash identifies the database from its driver and path. This keeps scripts attached to the database even if a saved connection profile is renamed or recreated.
 
 ## Requirements
 
@@ -128,8 +181,16 @@ npm run dev
 
 ## Safety model
 
-Connections can be marked read-only. The SQL console always runs inside a read-only transaction and also rejects statements whose leading keyword is not a supported read operation. Edits, inserts, deletes, and truncates remain local drafts until saved; the whole change set is committed in one transaction. Updates and deletes use primary-key predicates and are rolled back unless exactly one record is affected. Results are capped at 1,000 rows, and table pages at 500 rows per request.
+Connections can be marked read-only. The scratch SQL console accepts only a single `SELECT`; SQLite executes it with `PRAGMA query_only = ON`, while PostgreSQL executes it inside a read-only transaction. Saved script statements on a read-only connection are routed through the same restriction.
+
+Saved scripts on an editable connection intentionally run SQL directly, including write and DDL statements. When multiple statements are selected, QueryNest executes them one by one rather than wrapping the whole selection in an implicit transaction.
+
+Edits, inserts, deletes, and truncates remain local drafts until explicitly saved. A table's complete change set is committed in one transaction, and undo/redo changes only those local drafts rather than issuing compensating writes. Existing-row updates and deletes use primary-key predicates and are rolled back unless exactly one record is affected. Table and column identifiers are validated against introspected schema before write SQL is constructed.
+
+Backup and restore preserve database DDL instead of reconstructing it from column metadata. `.qnb` restores validate archived objects against the manifest before replaying SQL, and incomplete `.pqnb` files cannot be restored. A `.qnb` or SQL dump should still be treated as trusted input because restoring it intentionally executes database definition statements.
+
+Query results are capped at 1,000 rows and normal table pages at 500 rows per request. Transfer and restore paths use bounded or streamed processing where practical, and file-preview tokens scope a preview to the file selected for that operation.
 
 ## Next milestones
 
-MySQL support, export to CSV/JSON, query history, and SSH tunnelling are intentionally left for the next phase.
+The current roadmap still includes broader database support such as MySQL, richer table filtering and column selection, query history, and SSH tunnelling. See `todos.md` for working notes; completed items there may lag behind the implementation, so the code and this README are the source of truth for shipped behavior.
