@@ -404,21 +404,13 @@ func (a *App) writeDatabaseBackup(finalPath string, batchBytes int64) (result Tr
 		return result, fmt.Errorf("close backup: %w", err)
 	}
 	fileClosed = true
-	if err := os.Rename(pendingPath, finalPath); err != nil {
+	if err := replaceFile(pendingPath, finalPath); err != nil {
 		return result, fmt.Errorf("complete backup: %w", err)
 	}
 	completed = true
 	result.Path = finalPath
-	directoryHandle, err := os.Open(directory)
-	if err != nil {
-		return result, fmt.Errorf("open backup directory for sync: %w", err)
-	}
-	if err := directoryHandle.Sync(); err != nil {
-		_ = directoryHandle.Close()
+	if err := syncDirectory(directory); err != nil {
 		return result, fmt.Errorf("sync backup directory: %w", err)
-	}
-	if err := directoryHandle.Close(); err != nil {
-		return result, fmt.Errorf("close backup directory: %w", err)
 	}
 	return TransferResult{Path: finalPath, Tables: len(manifest.Tables), Rows: processed}, nil
 }
