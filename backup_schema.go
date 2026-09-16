@@ -2,7 +2,9 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 )
@@ -40,10 +42,6 @@ var backupObjectPrefixes = map[string]*regexp.Regexp{
 	objectTrigger:    regexp.MustCompile(`(?is)^create\s+(constraint\s+)?trigger\s`),
 }
 
-// Trigger and routine bodies contain statement separators of their own. Every
-// other object has to be a single statement.
-var backupObjectMayHaveBody = map[string]bool{objectTrigger: true, objectFunction: true}
-
 func validateBackupObject(object backupObject) error {
 	statement := strings.TrimSpace(object.SQL)
 	prefix, known := backupObjectPrefixes[object.Kind]
@@ -53,10 +51,258 @@ func validateBackupObject(object backupObject) error {
 	if statement == "" || !prefix.MatchString(statement) {
 		return fmt.Errorf("backup object %s %q does not contain a matching statement", object.Kind, object.Name)
 	}
-	if !backupObjectMayHaveBody[object.Kind] && strings.Contains(strings.TrimSuffix(statement, ";"), ";") {
-		return fmt.Errorf("backup object %s %q contains more than one statement", object.Kind, object.Name)
+	scanner := newRestoreSQLScanner(strings.NewReader(statement))
+	parsed, err := scanner.Next()
+	if err != nil {
+		return fmt.Errorf("backup object %s %q is malformed: %w", object.Kind, object.Name, err)
+	}
+	if trailing, nextErr := scanner.Next(); !errors.Is(nextErr, io.EOF) {
+		if nextErr != nil {
+			return fmt.Errorf("backup object %s %q is malformed: %w", object.Kind, object.Name, nextErr)
+		}
+		return fmt.Errorf("backup object %s %q contains a trailing statement %q", object.Kind, object.Name, trailing)
+	}
+	if err := validateBackupObjectIdentity(object, parsed); err != nil {
+		return err
 	}
 	return nil
+}
+
+type backupSQLToken struct {
+	text   string
+	quoted bool
+}
+
+func validateBackupObjectIdentity(object backupObject, statement string) error {
+	tokens, err := backupSQLHeaderTokens(statement)
+	if err != nil {
+		return fmt.Errorf("backup object %s %q is malformed: %w", object.Kind, object.Name, err)
+	}
+	position := 0
+	consume := func(word string) bool {
+		if position >= len(tokens) || tokens[position].quoted || !strings.EqualFold(tokens[position].text, word) {
+			return false
+		}
+		position++
+		return true
+	}
+	if !consume("create") && object.Kind != objectConstraint {
+		return backupIdentityError(object)
+	}
+	switch object.Kind {
+	case objectTable:
+		if consume("temp") || consume("temporary") {
+		}
+		if !consume("table") {
+			return backupIdentityError(object)
+		}
+		consumeOptionalWords(tokens, &position, "if", "not", "exists")
+		return validateParsedObjectName(object, tokens, position, object.Schema, object.Name)
+	case objectView:
+		consumeOptionalWords(tokens, &position, "or", "replace")
+		consume("materialized")
+		if !consume("view") {
+			return backupIdentityError(object)
+		}
+		return validateParsedObjectName(object, tokens, position, object.Schema, object.Name)
+	case objectFunction:
+		consumeOptionalWords(tokens, &position, "or", "replace")
+		if !consume("function") && !consume("procedure") {
+			return backupIdentityError(object)
+		}
+		return validateParsedObjectName(object, tokens, position, object.Schema, object.Name)
+	case objectIndex:
+		consume("unique")
+		if !consume("index") {
+			return backupIdentityError(object)
+		}
+		consumeOptionalWords(tokens, &position, "if", "not", "exists")
+		next, err := validateParsedObjectNameAtOptionalSchema(object, tokens, position, object.Schema, object.Name, true)
+		if err != nil {
+			return err
+		}
+		on := findBackupSQLWord(tokens, next, "on")
+		if on < 0 {
+			return backupIdentityError(object)
+		}
+		return validateParsedObjectName(object, tokens, on+1, object.Schema, object.Table)
+	case objectTrigger:
+		consume("constraint")
+		if !consume("trigger") {
+			return backupIdentityError(object)
+		}
+		next, err := validateParsedObjectNameAt(object, tokens, position, "", object.Name)
+		if err != nil {
+			return err
+		}
+		on := findBackupSQLWord(tokens, next, "on")
+		if on < 0 {
+			return backupIdentityError(object)
+		}
+		return validateParsedObjectName(object, tokens, on+1, object.Schema, object.Table)
+	case objectConstraint:
+		position = 0
+		if !consume("alter") || !consume("table") {
+			return backupIdentityError(object)
+		}
+		next, err := validateParsedObjectNameAt(object, tokens, position, object.Schema, object.Table)
+		if err != nil {
+			return err
+		}
+		position = next
+		if !consume("add") {
+			return backupIdentityError(object)
+		}
+		consume("constraint")
+		return validateParsedObjectName(object, tokens, position, "", object.Name)
+	default:
+		return backupIdentityError(object)
+	}
+}
+
+func consumeOptionalWords(tokens []backupSQLToken, position *int, words ...string) {
+	start := *position
+	for _, word := range words {
+		if *position >= len(tokens) || tokens[*position].quoted || !strings.EqualFold(tokens[*position].text, word) {
+			*position = start
+			return
+		}
+		*position++
+	}
+}
+
+func findBackupSQLWord(tokens []backupSQLToken, start int, word string) int {
+	for index := start; index < len(tokens); index++ {
+		if !tokens[index].quoted && strings.EqualFold(tokens[index].text, word) {
+			return index
+		}
+	}
+	return -1
+}
+
+func validateParsedObjectName(object backupObject, tokens []backupSQLToken, start int, schema, name string) error {
+	_, err := validateParsedObjectNameAt(object, tokens, start, schema, name)
+	return err
+}
+
+func validateParsedObjectNameAt(object backupObject, tokens []backupSQLToken, start int, schema, name string) (int, error) {
+	return validateParsedObjectNameAtOptionalSchema(object, tokens, start, schema, name, false)
+}
+
+func validateParsedObjectNameAtOptionalSchema(object backupObject, tokens []backupSQLToken, start int, schema, name string, allowMissingSchema bool) (int, error) {
+	first, next, ok := readBackupIdentifier(tokens, start)
+	if !ok {
+		return start, backupIdentityError(object)
+	}
+	actualSchema, actualName := "", first.text
+	nameQuoted := first.quoted
+	if next < len(tokens) && tokens[next].text == "." {
+		second, end, ok := readBackupIdentifier(tokens, next+1)
+		if !ok {
+			return start, backupIdentityError(object)
+		}
+		actualSchema, actualName, nameQuoted, next = first.text, second.text, second.quoted, end
+	}
+	if !backupIdentifierEqual(actualName, name, nameQuoted) {
+		return start, backupIdentityError(object)
+	}
+	if actualSchema != "" && !backupIdentifierEqual(actualSchema, schema, first.quoted) {
+		return start, backupIdentityError(object)
+	}
+	if actualSchema == "" && schema != "" && schema != "main" && !allowMissingSchema {
+		return start, backupIdentityError(object)
+	}
+	return next, nil
+}
+
+func readBackupIdentifier(tokens []backupSQLToken, position int) (backupSQLToken, int, bool) {
+	if position >= len(tokens) || tokens[position].text == "." || tokens[position].text == "(" || tokens[position].text == ")" {
+		return backupSQLToken{}, position, false
+	}
+	return tokens[position], position + 1, true
+}
+
+func backupIdentifierEqual(actual, expected string, quoted bool) bool {
+	if quoted {
+		return actual == expected
+	}
+	return strings.EqualFold(actual, expected)
+}
+
+func backupIdentityError(object backupObject) error {
+	return fmt.Errorf("backup %s SQL does not create manifest object %s.%s", object.Kind, object.Schema, object.Name)
+}
+
+func backupSQLHeaderTokens(statement string) ([]backupSQLToken, error) {
+	tokens := make([]backupSQLToken, 0, 32)
+	for index := 0; index < len(statement) && len(tokens) < 128; {
+		value := statement[index]
+		if isSQLSpace(value) {
+			index++
+			continue
+		}
+		if index+1 < len(statement) && statement[index:index+2] == "--" {
+			newline := strings.IndexByte(statement[index+2:], '\n')
+			if newline < 0 {
+				break
+			}
+			index += newline + 3
+			continue
+		}
+		if index+1 < len(statement) && statement[index:index+2] == "/*" {
+			end := strings.Index(statement[index+2:], "*/")
+			if end < 0 {
+				return nil, errors.New("unterminated SQL comment")
+			}
+			index += end + 4
+			continue
+		}
+		if value == '\'' || value == '$' {
+			break
+		}
+		if value == '"' || value == '`' || value == '[' {
+			closing := value
+			if value == '[' {
+				closing = ']'
+			}
+			index++
+			var text strings.Builder
+			closed := false
+			for index < len(statement) {
+				if statement[index] != closing {
+					text.WriteByte(statement[index])
+					index++
+					continue
+				}
+				if index+1 < len(statement) && statement[index+1] == closing {
+					text.WriteByte(closing)
+					index += 2
+					continue
+				}
+				index++
+				tokens = append(tokens, backupSQLToken{text: text.String(), quoted: true})
+				closed = true
+				break
+			}
+			if !closed {
+				return nil, errors.New("unterminated quoted identifier")
+			}
+			continue
+		}
+		if isSQLWordStart(value) {
+			start := index
+			for index < len(statement) && isSQLWordPart(statement[index]) {
+				index++
+			}
+			tokens = append(tokens, backupSQLToken{text: statement[start:index]})
+			continue
+		}
+		if value == '.' || value == '(' || value == ')' || value == ',' || value == ';' {
+			tokens = append(tokens, backupSQLToken{text: string(value)})
+		}
+		index++
+	}
+	return tokens, nil
 }
 
 // backupSchemaObjects returns the archived tables' DDL plus everything that

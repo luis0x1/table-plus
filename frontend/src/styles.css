@@ -5217,6 +5217,11 @@ button:not(:disabled):active {
   border-color: #315b46;
   background: #14251e;
 }
+.connection-feedback.warning {
+  color: #f0c27b;
+  border-color: #694d25;
+  background: #2b2112;
+}
 
 .welcome-content.has-saved .welcome-mark {
   width: 48px;

@@ -90,25 +90,40 @@ export const DEFAULT_POSTGRES_CONFIG: PostgresConfig = {
   password: '',
   database: 'postgres',
   sslMode: 'prefer',
+  sslRootCert: '',
+  sslClientCert: '',
+  sslClientKey: '',
+  tlsServerName: '',
   readOnly: false,
   saveConnection: true,
   savePassword: true,
 }
 
 export function configForSaved(profile: SavedConnection): PostgresConfig {
+  const host = profile.host ?? 'localhost'
   return {
     ...DEFAULT_POSTGRES_CONFIG,
     id: profile.id,
     name: profile.name,
-    host: profile.host ?? 'localhost',
+    host,
     port: profile.port ?? 5432,
     user: profile.user ?? 'postgres',
     database: profile.database ?? 'postgres',
-    sslMode: (profile.sslMode as PostgresConfig['sslMode']) ?? 'prefer',
+    sslMode: (profile.sslMode as PostgresConfig['sslMode']) ?? (localPostgresHost(host) ? 'prefer' : 'verify-full'),
+    sslRootCert: profile.sslRootCert ?? '',
+    sslClientCert: profile.sslClientCert ?? '',
+    sslClientKey: profile.sslClientKey ?? '',
+    tlsServerName: profile.tlsServerName ?? '',
     readOnly: profile.readOnly,
     savePassword: profile.hasPassword,
   }
 }
+
+const localPostgresHost = (host: string) =>
+  /^(localhost|127(?:\.\d+){3}|\[?::1\]?)$/i.test(host.trim()) || host.trim().startsWith('/')
+
+const weakPostgresTLS = (host: string, mode: PostgresConfig['sslMode']) =>
+  !localPostgresHost(host) && mode !== 'verify-ca' && mode !== 'verify-full'
 
 export function Welcome(
   props: SavedConnectionsProps & { onOpen: () => void; onPostgres: () => void; onDemo: () => void },
@@ -335,6 +350,15 @@ export function ConnectionModal(
   const pending = () => props.busy || submitting() || testing()
   const update = <K extends keyof PostgresConfig>(key: K, value: PostgresConfig[K]) =>
     props.setConfig((current) => ({ ...current, [key]: value }))
+  const updateHost = (host: string) =>
+    props.setConfig((current) => ({
+      ...current,
+      host,
+      sslMode:
+        localPostgresHost(current.host) && !localPostgresHost(host) && current.sslMode === 'prefer'
+          ? 'verify-full'
+          : current.sslMode,
+    }))
 
   createEffect(
     on(
@@ -425,7 +449,7 @@ export function ConnectionModal(
                 <input
                   required
                   value={props.config.host}
-                  onInput={(e) => update('host', e.currentTarget.value)}
+                  onInput={(e) => updateHost(e.currentTarget.value)}
                   placeholder="localhost"
                   ref={(el) => queueMicrotask(() => el.focus())}
                 />
@@ -480,6 +504,38 @@ export function ConnectionModal(
                   autocomplete="current-password"
                 />
               </label>
+              <label class="span-2">
+                <span>Root CA certificate</span>
+                <input
+                  value={props.config.sslRootCert}
+                  onInput={(e) => update('sslRootCert', e.currentTarget.value)}
+                  placeholder="Optional path to CA certificate"
+                />
+              </label>
+              <label>
+                <span>Client certificate</span>
+                <input
+                  value={props.config.sslClientCert}
+                  onInput={(e) => update('sslClientCert', e.currentTarget.value)}
+                  placeholder="Optional certificate path"
+                />
+              </label>
+              <label>
+                <span>Client key</span>
+                <input
+                  value={props.config.sslClientKey}
+                  onInput={(e) => update('sslClientKey', e.currentTarget.value)}
+                  placeholder="Optional private-key path"
+                />
+              </label>
+              <label class="span-2">
+                <span>TLS server name</span>
+                <input
+                  value={props.config.tlsServerName}
+                  onInput={(e) => update('tlsServerName', e.currentTarget.value)}
+                  placeholder="Defaults to the connection host"
+                />
+              </label>
             </div>
             <div class="connection-options">
               <label>
@@ -509,6 +565,15 @@ export function ConnectionModal(
               </label>
             </div>
           </fieldset>
+          <Show when={weakPostgresTLS(props.config.host, props.config.sslMode)}>
+            <div class="connection-feedback warning" role="alert">
+              <Alert size={15} />
+              <span>
+                This mode does not authenticate a remote PostgreSQL server and may permit interception. Use Verify full
+                whenever possible.
+              </span>
+            </div>
+          </Show>
           <Show when={success()}>
             <div class="connection-feedback success" role="status">
               <Check size={15} />
@@ -694,6 +759,38 @@ export function SavedConnectionEditModal(props: {
                     autocomplete="new-password"
                   />
                 </label>
+                <label class="span-2">
+                  <span>Root CA certificate</span>
+                  <input
+                    value={draft().sslRootCert ?? ''}
+                    onInput={(event) => update('sslRootCert', event.currentTarget.value)}
+                    placeholder="Optional path to CA certificate"
+                  />
+                </label>
+                <label>
+                  <span>Client certificate</span>
+                  <input
+                    value={draft().sslClientCert ?? ''}
+                    onInput={(event) => update('sslClientCert', event.currentTarget.value)}
+                    placeholder="Optional certificate path"
+                  />
+                </label>
+                <label>
+                  <span>Client key</span>
+                  <input
+                    value={draft().sslClientKey ?? ''}
+                    onInput={(event) => update('sslClientKey', event.currentTarget.value)}
+                    placeholder="Optional private-key path"
+                  />
+                </label>
+                <label class="span-2">
+                  <span>TLS server name</span>
+                  <input
+                    value={draft().tlsServerName ?? ''}
+                    onInput={(event) => update('tlsServerName', event.currentTarget.value)}
+                    placeholder="Defaults to the connection host"
+                  />
+                </label>
               </Show>
             </div>
             <Show when={postgres()}>
@@ -717,6 +814,20 @@ export function SavedConnectionEditModal(props: {
               </div>
             </Show>
           </fieldset>
+          <Show
+            when={
+              postgres() &&
+              weakPostgresTLS(draft().host ?? '', (draft().sslMode ?? 'prefer') as PostgresConfig['sslMode'])
+            }
+          >
+            <div class="connection-feedback warning" role="alert">
+              <Alert size={15} />
+              <span>
+                This mode does not authenticate a remote PostgreSQL server and may permit interception. Use Verify full
+                whenever possible.
+              </span>
+            </div>
+          </Show>
           <footer>
             <button type="button" class="secondary" onClick={props.onClose} disabled={pending()}>
               Cancel

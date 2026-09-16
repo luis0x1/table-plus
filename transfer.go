@@ -65,6 +65,7 @@ type TransferPreview struct {
 	Tables     []TransferTablePreview `json:"tables"`
 	Skipped    []TransferSkippedTable `json:"skipped,omitempty"`
 	Statements int                    `json:"statements,omitempty"`
+	Token      string                 `json:"token,omitempty"`
 }
 
 type TransferResult struct {
@@ -292,10 +293,16 @@ func (a *App) writeDatabaseBackup(finalPath string, batchBytes int64) (result Tr
 			return result, fmt.Errorf("count %s.%s for backup: %w", table.Schema, table.Name, err)
 		}
 	}
-	pendingPath := strings.TrimSuffix(finalPath, filepath.Ext(finalPath)) + ".pqnb"
-	file, err := os.OpenFile(pendingPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	directory := filepath.Dir(finalPath)
+	prefix := "." + strings.TrimSuffix(filepath.Base(finalPath), filepath.Ext(finalPath)) + "-"
+	file, err := os.CreateTemp(directory, prefix+"*.pqnb")
 	if err != nil {
 		return result, fmt.Errorf("create pending backup: %w", err)
+	}
+	pendingPath := file.Name()
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return result, fmt.Errorf("secure pending backup: %w", err)
 	}
 	completed := false
 	fileClosed := false
@@ -401,6 +408,18 @@ func (a *App) writeDatabaseBackup(finalPath string, batchBytes int64) (result Tr
 		return result, fmt.Errorf("complete backup: %w", err)
 	}
 	completed = true
+	result.Path = finalPath
+	directoryHandle, err := os.Open(directory)
+	if err != nil {
+		return result, fmt.Errorf("open backup directory for sync: %w", err)
+	}
+	if err := directoryHandle.Sync(); err != nil {
+		_ = directoryHandle.Close()
+		return result, fmt.Errorf("sync backup directory: %w", err)
+	}
+	if err := directoryHandle.Close(); err != nil {
+		return result, fmt.Errorf("close backup directory: %w", err)
+	}
 	return TransferResult{Path: finalPath, Tables: len(manifest.Tables), Rows: processed}, nil
 }
 
@@ -460,15 +479,21 @@ func (a *App) ChooseRestoreBackup() (TransferPreview, error) {
 	}
 	if strings.EqualFold(filepath.Ext(path), ".sql") {
 		status := a.GetStatus()
-		return previewSQLRestore(path, status.Driver, status.Database)
+		preview, err := previewSQLRestore(path, status.Driver, status.Database)
+		if err != nil {
+			return TransferPreview{}, err
+		}
+		preview.Token, err = a.registerPreviewFile(path)
+		return preview, err
 	}
 	if !strings.EqualFold(filepath.Ext(path), ".qnb") {
 		return TransferPreview{}, errors.New("restore supports completed .qnb backups and .sql dumps")
 	}
-	manifest, _, err := readBackupManifest(path)
+	manifest, reader, err := readBackupManifest(path)
 	if err != nil {
 		return TransferPreview{}, err
 	}
+	defer reader.Close()
 	preview := TransferPreview{Kind: "restore", Path: path, Format: manifest.Format, Driver: manifest.Driver, Database: manifest.Database, Tables: make([]TransferTablePreview, len(manifest.Tables))}
 	for i, table := range manifest.Tables {
 		columns := make([]string, len(table.Columns))
@@ -477,7 +502,8 @@ func (a *App) ChooseRestoreBackup() (TransferPreview, error) {
 		}
 		preview.Tables[i] = TransferTablePreview{Schema: table.Schema, Name: table.Name, Columns: columns, Rows: table.Rows}
 	}
-	return preview, nil
+	preview.Token, err = a.registerPreviewFile(path)
+	return preview, err
 }
 
 func readBackupManifest(path string) (backupManifest, io.ReadCloser, error) {
@@ -485,12 +511,22 @@ func readBackupManifest(path string) (backupManifest, io.ReadCloser, error) {
 	if err != nil {
 		return backupManifest{}, nil, fmt.Errorf("open backup: %w", err)
 	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
+		return backupManifest{}, nil, errors.New("backup source must be a regular file")
+	}
+	if info.Size() > maxBackupCompressedBytes {
+		_ = file.Close()
+		return backupManifest{}, nil, fmt.Errorf("compressed backup exceeds the %d byte limit", maxBackupCompressedBytes)
+	}
 	compressed, err := gzip.NewReader(file)
 	if err != nil {
 		_ = file.Close()
 		return backupManifest{}, nil, fmt.Errorf("open backup compression: %w", err)
 	}
-	decoder := json.NewDecoder(compressed)
+	limited := &io.LimitedReader{R: compressed, N: maxBackupDecompressedBytes + 1}
+	decoder := json.NewDecoder(limited)
 	var manifest backupManifest
 	if err := decoder.Decode(&manifest); err != nil {
 		_ = compressed.Close()
@@ -502,7 +538,26 @@ func readBackupManifest(path string) (backupManifest, io.ReadCloser, error) {
 		_ = file.Close()
 		return backupManifest{}, nil, errors.New("unsupported QueryNest backup format")
 	}
+	if err := validateBackupManifestBudget(manifest); err != nil {
+		_ = compressed.Close()
+		_ = file.Close()
+		return backupManifest{}, nil, err
+	}
 	return manifest, &backupReadCloser{Decoder: decoder, compressed: compressed, file: file}, nil
+}
+
+func validateBackupManifestBudget(manifest backupManifest) error {
+	if len(manifest.Tables) > maxBackupTables || len(manifest.Objects) > maxBackupObjects {
+		return errors.New("backup manifest exceeds the object budget")
+	}
+	var rows int64
+	for _, table := range manifest.Tables {
+		if len(table.Columns) > maxBackupColumnsPerTable || table.Rows < 0 || table.Rows > maxBackupRows-rows {
+			return errors.New("backup manifest exceeds the table or row budget")
+		}
+		rows += table.Rows
+	}
+	return nil
 }
 
 type backupReadCloser struct {
@@ -526,7 +581,15 @@ func backupDecoder(reader io.ReadCloser) *json.Decoder {
 	return reader.(*backupReadCloser).Decoder
 }
 
-func (a *App) RestoreDatabase(path string) (TransferResult, error) {
+func (a *App) RestoreDatabase(token string, restoreCode bool) (TransferResult, error) {
+	path, err := a.consumePreviewFile(token)
+	if err != nil {
+		return TransferResult{}, err
+	}
+	return a.restoreDatabasePath(path, restoreCode)
+}
+
+func (a *App) restoreDatabasePath(path string, restoreCode bool) (TransferResult, error) {
 	if strings.EqualFold(filepath.Ext(path), ".sql") {
 		return a.restoreSQLDatabase(path)
 	}
@@ -632,6 +695,9 @@ func (a *App) RestoreDatabase(path string) (TransferResult, error) {
 		// rejects an intermediate state.
 		for i := len(manifest.Objects) - 1; i >= 0; i-- {
 			object := manifest.Objects[i]
+			if !restoreCode && (object.Kind == objectFunction || object.Kind == objectTrigger) {
+				continue
+			}
 			statement := dropBackupObjectSQL(driver, object)
 			if statement == "" {
 				continue
@@ -748,6 +814,9 @@ func (a *App) RestoreDatabase(path string) (TransferResult, error) {
 		// backup recorded them, which is the order that satisfies dependencies.
 		for _, object := range manifest.Objects {
 			if object.Kind == objectTable {
+				continue
+			}
+			if !restoreCode && (object.Kind == objectFunction || object.Kind == objectTrigger) {
 				continue
 			}
 			if _, err := tx.Exec(object.SQL); err != nil {
@@ -930,10 +999,10 @@ func (a *App) ExportTables(tables []TableRef, format string) (TransferResult, er
 	if len(tables) > 1 {
 		format = "json"
 	}
-	if format != "csv" && format != "json" {
-		return TransferResult{}, errors.New("export format must be CSV or JSON")
+	if format != "csv" && format != "csv-raw" && format != "json" {
+		return TransferResult{}, errors.New("export format must be safe CSV, raw CSV, or JSON")
 	}
-	extension := "." + format
+	extension := "." + strings.TrimSuffix(format, "-raw")
 	defaultName := tables[0].Name + extension
 	if len(tables) > 1 {
 		defaultName = a.GetStatus().Database + "-tables.json"
@@ -945,14 +1014,18 @@ func (a *App) ExportTables(tables []TableRef, format string) (TransferResult, er
 	if !strings.EqualFold(filepath.Ext(path), extension) {
 		path += extension
 	}
-	if format == "csv" {
-		return a.exportCSV(path, tables[0])
+	if format == "csv" || format == "csv-raw" {
+		return a.exportCSVMode(path, tables[0], format == "csv")
 	}
 	return a.exportJSON(path, tables)
 }
 
 func (a *App) exportCSV(path string, table TableRef) (TransferResult, error) {
-	db, driver, err := a.connection()
+	return a.exportCSVMode(path, table, true)
+}
+
+func (a *App) exportCSVMode(path string, table TableRef, spreadsheetSafe bool) (TransferResult, error) {
+	db, _, err := a.connection()
 	if err != nil {
 		return TransferResult{}, err
 	}
@@ -991,6 +1064,9 @@ func (a *App) exportCSV(path string, table TableRef) (TransferResult, error) {
 		record := make([]string, len(values))
 		for i, value := range values {
 			record[i] = exportString(value)
+			if spreadsheetSafe {
+				record[i] = spreadsheetSafeCSV(record[i])
+			}
 		}
 		if err := writer.Write(record); err != nil {
 			return TransferResult{}, err
@@ -1007,8 +1083,19 @@ func (a *App) exportCSV(path string, table TableRef) (TransferResult, error) {
 	if err := file.Sync(); err != nil {
 		return TransferResult{}, err
 	}
-	_ = driver
 	return TransferResult{Path: path, Tables: 1, Rows: count}, nil
+}
+
+func spreadsheetSafeCSV(value string) string {
+	if value == "" {
+		return value
+	}
+	switch value[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + value
+	default:
+		return value
+	}
 }
 
 func exportString(value any) string {
@@ -1165,11 +1252,15 @@ func (a *App) ChooseTableImport(table TableRef) (TransferPreview, error) {
 			}
 		}
 	}
-	return TransferPreview{Kind: "import", Path: path, Format: format, Driver: a.GetStatus().Driver, Database: a.GetStatus().Database, Tables: []TransferTablePreview{preview}}, nil
+	token, err := a.registerPreviewFile(path)
+	if err != nil {
+		return TransferPreview{}, err
+	}
+	return TransferPreview{Kind: "import", Path: path, Format: format, Driver: a.GetStatus().Driver, Database: a.GetStatus().Database, Tables: []TransferTablePreview{preview}, Token: token}, nil
 }
 
 func previewCSVImport(path string, target TableRef) (tableExport, int64, error) {
-	file, err := os.Open(path)
+	file, err := openTransferSource(path)
 	if err != nil {
 		return tableExport{}, 0, fmt.Errorf("open import: %w", err)
 	}
@@ -1182,6 +1273,9 @@ func previewCSVImport(path string, target TableRef) (tableExport, int64, error) 
 	if err != nil {
 		return tableExport{}, 0, fmt.Errorf("read CSV header: %w", err)
 	}
+	if len(columns) > maxImportColumns {
+		return tableExport{}, 0, errors.New("CSV import exceeds the column budget")
+	}
 	samples := make([][]any, 0, previewRowLimit)
 	var count int64
 	for {
@@ -1193,6 +1287,9 @@ func previewCSVImport(path string, target TableRef) (tableExport, int64, error) 
 			return tableExport{}, 0, fmt.Errorf("read CSV row %d: %w", count+2, err)
 		}
 		count++
+		if count > maxImportRows {
+			return tableExport{}, 0, errors.New("CSV import exceeds the row budget")
+		}
 		if len(samples) < previewRowLimit {
 			row := make([]any, len(record))
 			for i, value := range record {
@@ -1209,7 +1306,7 @@ func previewCSVImport(path string, target TableRef) (tableExport, int64, error) 
 }
 
 func parseImportFile(path string, target TableRef) (tableExport, string, error) {
-	file, err := os.Open(path)
+	file, err := openTransferSource(path)
 	if err != nil {
 		return tableExport{}, "", fmt.Errorf("open import: %w", err)
 	}
@@ -1243,6 +1340,11 @@ func parseImportFile(path string, target TableRef) (tableExport, string, error) 
 		return tableExport{}, "", errors.New("unsupported JSON table export")
 	}
 	for _, table := range exported.Tables {
+		if len(table.Columns) > maxImportColumns || len(table.Rows) > maxImportRows {
+			return tableExport{}, "", errors.New("JSON import exceeds the column or row budget")
+		}
+	}
+	for _, table := range exported.Tables {
 		if table.Name == target.Name && (table.Schema == target.Schema || table.Schema == "") {
 			return table, "json", nil
 		}
@@ -1253,7 +1355,11 @@ func parseImportFile(path string, target TableRef) (tableExport, string, error) 
 	return tableExport{}, "", errors.New("JSON export does not contain the selected table")
 }
 
-func (a *App) ImportTable(table TableRef, path, conflict string) (TransferResult, error) {
+func (a *App) ImportTable(table TableRef, token, conflict string) (TransferResult, error) {
+	path, err := a.consumePreviewFile(token)
+	if err != nil {
+		return TransferResult{}, err
+	}
 	db, driver, readOnly, err := a.editableConnection()
 	if err != nil {
 		return TransferResult{}, err
@@ -1329,7 +1435,7 @@ func (a *App) ImportTable(table TableRef, path, conflict string) (TransferResult
 }
 
 func (a *App) importCSVTable(db *sql.DB, driver string, table TableRef, path, conflict string) (TransferResult, error) {
-	file, err := os.Open(path)
+	file, err := openTransferSource(path)
 	if err != nil {
 		return TransferResult{}, fmt.Errorf("open import: %w", err)
 	}
@@ -1341,6 +1447,9 @@ func (a *App) importCSVTable(db *sql.DB, driver string, table TableRef, path, co
 	}
 	if err != nil {
 		return TransferResult{}, fmt.Errorf("read CSV header: %w", err)
+	}
+	if len(columns) > maxImportColumns {
+		return TransferResult{}, errors.New("CSV import exceeds the column budget")
 	}
 	targetColumns, err := a.GetTableSchema(table.Schema, table.Name)
 	if err != nil {
@@ -1387,6 +1496,10 @@ func (a *App) importCSVTable(db *sql.DB, driver string, table TableRef, path, co
 			return TransferResult{}, fmt.Errorf("read CSV row %d: %w", rowIndex+2, err)
 		}
 		rowIndex++
+		if rowIndex > maxImportRows {
+			_ = tx.Rollback()
+			return TransferResult{}, errors.New("CSV import exceeds the row budget")
+		}
 		values := make([]any, len(record))
 		for i, value := range record {
 			if value == `\N` {

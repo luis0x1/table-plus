@@ -1,5 +1,5 @@
 import { createEffect, createSignal, Index, mergeProps, on, onCleanup, Show, type JSX } from 'solid-js'
-import type { ColumnInfo, RowOperation, TableData } from '../../types'
+import type { ColumnInfo, RowOperation, TableData, WireInt64 } from '../../types'
 import { Alert, ArrowDown, ArrowUp, Check, Code, Columns, X } from '../../components/ui/icons'
 
 export type PendingOperation = RowOperation & { id: string }
@@ -34,11 +34,26 @@ type DataGridProps = {
 
 function formatCell(value: unknown): JSX.Element {
   if (value === null || value === undefined) return <span class="null-value">NULL</span>
+  if (isWireInt64(value)) return value.value
   if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
 }
 
+function isWireInt64(value: unknown): value is WireInt64 {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    (value as Partial<WireInt64>).type === 'int64' &&
+    typeof (value as Partial<WireInt64>).value === 'string'
+  )
+}
+
+function cellText(value: unknown): string {
+  return isWireInt64(value) ? value.value : String(value ?? '')
+}
+
 function jsonText(value: unknown): string | null {
+  if (isWireInt64(value)) return null
   if (value !== null && typeof value === 'object') return JSON.stringify(value, null, 2)
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
@@ -52,6 +67,9 @@ function jsonText(value: unknown): string | null {
 
 function editedValue(text: string, original: unknown): unknown {
   if (text.trim().toLowerCase() === 'null') return null
+  if (isWireInt64(original) && /^-?\d+$/.test(text.trim())) {
+    return { type: 'int64', value: text.trim() } satisfies WireInt64
+  }
   if (typeof original === 'number') {
     const number = Number(text)
     return Number.isNaN(number) ? text : number
@@ -239,7 +257,7 @@ export default function DataGrid(raw: DataGridProps) {
 
   async function commitEdit() {
     const active = editing()
-    if (!active || !props.onUpdate || active.text === String(active.original ?? '')) return setEditing(null)
+    if (!active || !props.onUpdate || active.text === cellText(active.original)) return setEditing(null)
     setSaving(true)
     try {
       await props.onUpdate(active.column, active.row, editedValue(active.text, active.original))
@@ -351,7 +369,7 @@ export default function DataGrid(raw: DataGridProps) {
                     <Index each={shown()}>
                       {(item) => {
                         const value = () => row()[item().source]
-                        const text = () => String(value() ?? '')
+                        const text = () => cellText(value())
                         const isStatus = () => item().column.toLowerCase() === 'status'
                         const json = () => jsonText(value())
                         const active = () => {
@@ -368,7 +386,7 @@ export default function DataGrid(raw: DataGridProps) {
                                 setEditing({
                                   row: rowIndex(),
                                   column: item().column,
-                                  text: String(value() ?? ''),
+                                  text: cellText(value()),
                                   original: value(),
                                 })
                               }

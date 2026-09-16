@@ -338,12 +338,12 @@ func (a *App) SessionChooseRestoreBackup(id string) (TransferPreview, error) {
 	return child.ChooseRestoreBackup()
 }
 
-func (a *App) SessionRestoreDatabase(id, path string) (TransferResult, error) {
+func (a *App) SessionRestoreDatabase(id, token string, restoreCode bool) (TransferResult, error) {
 	child, err := a.databaseSession(id)
 	if err != nil {
 		return TransferResult{}, err
 	}
-	return child.RestoreDatabase(path)
+	return child.RestoreDatabase(token, restoreCode)
 }
 
 func (a *App) SessionPreviewTableExport(id string, tables []TableRef) (TransferPreview, error) {
@@ -370,12 +370,12 @@ func (a *App) SessionChooseTableImport(id string, table TableRef) (TransferPrevi
 	return child.ChooseTableImport(table)
 }
 
-func (a *App) SessionImportTable(id string, table TableRef, path, conflict string) (TransferResult, error) {
+func (a *App) SessionImportTable(id string, table TableRef, token, conflict string) (TransferResult, error) {
 	child, err := a.databaseSession(id)
 	if err != nil {
 		return TransferResult{}, err
 	}
-	return child.ImportTable(table, path, conflict)
+	return child.ImportTable(table, token, conflict)
 }
 
 func (a *App) SessionTruncateTables(id string, tables []TableRef) (int64, error) {

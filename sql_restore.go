@@ -63,14 +63,29 @@ func openRestoreSQLScanner(path string) (*restoreSQLScanner, error) {
 		_ = file.Close()
 		return nil, errors.New("SQL restore source must be a regular file")
 	}
-	reader := bufio.NewReaderSize(file, 64<<10)
+	if info.Size() > maxSQLRestoreBytes {
+		_ = file.Close()
+		return nil, fmt.Errorf("SQL restore source exceeds the %d byte limit", maxSQLRestoreBytes)
+	}
+	scanner := newRestoreSQLScanner(file)
+	scanner.file = file
+	reader := scanner.reader
 	if marker, _ := reader.Peek(3); bytes.Equal(marker, []byte{0xef, 0xbb, 0xbf}) {
 		_, _ = reader.Discard(3)
 	}
-	return &restoreSQLScanner{file: file, reader: reader, lineStart: true}, nil
+	return scanner, nil
 }
 
-func (scanner *restoreSQLScanner) Close() error { return scanner.file.Close() }
+func newRestoreSQLScanner(reader io.Reader) *restoreSQLScanner {
+	return &restoreSQLScanner{reader: bufio.NewReaderSize(reader, 64<<10), lineStart: true}
+}
+
+func (scanner *restoreSQLScanner) Close() error {
+	if scanner.file == nil {
+		return nil
+	}
+	return scanner.file.Close()
+}
 
 func isSQLWordStart(value byte) bool {
 	return value == '_' || value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
@@ -226,6 +241,9 @@ func (scanner *restoreSQLScanner) Next() (string, error) {
 			continue
 		}
 		scanner.statement.WriteByte(value)
+		if scanner.statement.Len() > maxSQLStatementBytes {
+			return "", fmt.Errorf("SQL statement exceeds the %d byte limit", maxSQLStatementBytes)
+		}
 
 		switch scanner.state {
 		case restoreSQLLineComment:

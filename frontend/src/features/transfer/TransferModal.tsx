@@ -5,8 +5,9 @@ import { Alert, File, Plus, Refresh, Save, Table, X } from '../../components/ui/
 export type TransferState = {
   preview: TransferPreview
   tables: TableRef[]
-  format: 'csv' | 'json'
+  format: 'csv' | 'csv-raw' | 'json'
   conflict: 'abort' | 'skip'
+  restoreCode: boolean
 }
 
 export default function TransferModal(props: {
@@ -158,6 +159,26 @@ export default function TransferModal(props: {
               </span>
             </div>
           </Show>
+          <Show when={preview().kind === 'restore' && preview().format !== 'sql'}>
+            <section class="transfer-options">
+              <b>Database code</b>
+              <div>
+                <button
+                  class={!props.state.restoreCode ? 'active' : ''}
+                  onClick={() => props.onChange({ ...props.state, restoreCode: false })}
+                >
+                  Skip routines &amp; triggers
+                </button>
+                <button
+                  class={props.state.restoreCode ? 'active' : ''}
+                  onClick={() => props.onChange({ ...props.state, restoreCode: true })}
+                >
+                  Restore database code
+                </button>
+              </div>
+              <small>Only enable database code for backups you trust.</small>
+            </section>
+          </Show>
           <Show when={preview().kind === 'export'}>
             <section class="transfer-options">
               <b>Export format</b>
@@ -167,7 +188,14 @@ export default function TransferModal(props: {
                   disabled={preview().tables.length > 1}
                   onClick={() => props.onChange({ ...props.state, format: 'csv' })}
                 >
-                  CSV
+                  CSV (safe)
+                </button>
+                <button
+                  class={props.state.format === 'csv-raw' ? 'active' : ''}
+                  disabled={preview().tables.length > 1}
+                  onClick={() => props.onChange({ ...props.state, format: 'csv-raw' })}
+                >
+                  CSV raw
                 </button>
                 <button
                   class={props.state.format === 'json' ? 'active' : ''}
@@ -176,9 +204,13 @@ export default function TransferModal(props: {
                   JSON
                 </button>
               </div>
-              <Show when={preview().tables.length > 1}>
-                <small>Multiple tables are exported as one JSON bundle.</small>
-              </Show>
+              <small>
+                {props.state.format === 'csv-raw'
+                  ? 'Raw CSV preserves exact values and may execute formulas when opened in spreadsheet software.'
+                  : preview().tables.length > 1
+                    ? 'Multiple tables are exported as one JSON bundle.'
+                    : 'Safe CSV neutralizes spreadsheet formula prefixes.'}
+              </small>
             </section>
           </Show>
           <Show when={preview().kind === 'import'}>
