@@ -28,15 +28,20 @@ QueryNest is a TablePlus-inspired desktop database client built with Go, Wails v
 - `frontend/src/lib/preferences/useSidebarPreferences.ts`: persisted sidebar sizing and appearance state.
 - `frontend/src/styles.css`: application and grid styling.
 
-## Code navigation
+## Repository tooling (mandatory)
 
-When `.codegraph/` exists, use CodeGraph before text search or broad file reads:
+The workspace is `/home/luis/myspace/table-plus`.
 
-```bash
-codegraph explore "symbol names or question"
-```
+- Use Code Review Graph to explore architecture and find symbols, dependencies, callers, callees, related tests, execution flows, and blast radius.
+- Treat Code Review Graph results only as navigation guidance. Always verify the current source with Local Harness before reaching a conclusion or making a change.
+- Use only Local Harness to read exact source, perform additional searches, edit files, run commands, build, test, and inspect Git status or diffs.
+- Before a multi-file or architectural change, use Code Review Graph to determine the affected scope.
+- After making changes, run the relevant tests with Local Harness, update the graph, then use Code Review Graph to check affected flows and test gaps.
+- Code Review Graph may be skipped for a small, clearly located change that affects only one file.
+- Never use Code Review Graph as a substitute for reading the current source.
+- Do not use any filesystem tool other than Local Harness for this repository.
 
-Use `rg` for exact text searches after CodeGraph has identified the relevant area. The CodeGraph database is a machine-local generated index and must not be committed.
+The Code Review Graph databases are machine-local generated indexes and must not be committed.
 
 ## Behavioral invariants
 
