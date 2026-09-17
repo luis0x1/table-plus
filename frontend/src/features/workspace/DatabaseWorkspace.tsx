@@ -753,6 +753,19 @@ export default function DatabaseWorkspace(props: {
     guardWorkspace('Close database?', 'Unsaved changes in this database will be lost.', props.onCloseSession)
   }
 
+  async function refreshDatabase() {
+    if (loadingTables()) return
+    setLoadingTables(true)
+    setError('')
+    try {
+      await loadTables()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setLoadingTables(false)
+    }
+  }
+
   async function refreshNow(key = activeTable()) {
     if (!tabStates[key]) return
     updateTabState(key, (current) => ({ ...current, loading: true, loadError: '' }))
@@ -1621,7 +1634,7 @@ export default function DatabaseWorkspace(props: {
             <div class="sidebar-footer">
               <DatabasePicker status={status} onSelect={props.onOpenDatabase} />
               <button
-                onClick={() => refresh()}
+                onClick={() => void refreshDatabase()}
                 class="icon-button database-refresh"
                 title="Refresh database"
                 aria-label="Refresh database"
