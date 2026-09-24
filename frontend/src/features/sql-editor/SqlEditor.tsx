@@ -1,16 +1,12 @@
 import {
+  acceptCompletion,
   autocompletion,
   closeBrackets,
   closeBracketsKeymap,
-  closeCompletion,
   completionKeymap,
-  completionStatus,
-  startCompletion,
-  type CompletionResult,
-  type CompletionSource,
 } from '@codemirror/autocomplete'
 import { defaultKeymap, indentWithTab } from '@codemirror/commands'
-import { PostgreSQL, SQLite, keywordCompletionSource, sql } from '@codemirror/lang-sql'
+import { PostgreSQL, SQLite, sql } from '@codemirror/lang-sql'
 import {
   bracketMatching,
   foldGutter,
@@ -37,16 +33,10 @@ import {
 } from '@codemirror/view'
 import { tags } from '@lezer/highlight'
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js'
-import {
-  completionContext,
-  scanSql,
-  sqlCompletions,
-  statementsInRange,
-  summarizeStatement,
-  tableAliases,
-  type CompletionTable,
-  type SqlStatement,
-} from './sql'
+import { scanSql, statementsInRange, summarizeStatement, type SqlStatement } from './sql'
+import type { CompletionTable } from './completion'
+import { createSqlCompletionSource } from './completionSource'
+import type { TableRef } from '../../types'
 
 export type EditorSelection = { start: number; end: number; direction?: 'forward' | 'backward' | 'none' }
 
@@ -66,7 +56,7 @@ type SqlEditorProps = {
   /** Reports what a run would cover, so the panel header can drive the button. */
   onRunListChange?: (statements: SqlStatement[]) => void
   /** Asks the workspace to load a table's columns the first time one is needed. */
-  onNeedColumns?: (table: string) => void
+  onNeedColumns?: (table: TableRef) => Promise<void>
 }
 
 const queryNestHighlight = HighlightStyle.define([
@@ -126,47 +116,6 @@ function codeMirrorSelection(selection: EditorSelection | undefined, length: num
     : CodeMirrorSelection.range(start, end)
 }
 
-function contextualCompletionSource(props: SqlEditorProps): CompletionSource {
-  return (context) => {
-    const text = context.state.doc.toString()
-    const active = completionContext(text, context.pos)
-    if (!active || (!context.explicit && !active.prefix && !active.qualifier)) return null
-
-    // Fetch only columns relevant to the current statement. The workspace
-    // caches even an empty result, so failed introspection is not retried.
-    const wanted = new Set<string>()
-    if (active.qualifier) wanted.add(active.qualifier)
-    if (active.statement) for (const table of Object.values(tableAliases(active.statement.body))) wanted.add(table)
-    for (const name of wanted) {
-      const known = props.tables.find((table) => table.name.toLowerCase() === name.toLowerCase())
-      if (known && !known.columns.length) props.onNeedColumns?.(known.name)
-    }
-
-    const options = sqlCompletions(active, props.tables)
-      .filter((item) => item.kind !== 'keyword')
-      .map((item) => ({
-        label: item.label,
-        detail: item.detail,
-        type: item.kind === 'column' ? 'property' : 'class',
-        boost: item.kind === 'column' ? 90 : 50,
-      }))
-    return options.length ? { from: active.start, to: active.end, options, filter: false } : null
-  }
-}
-
-function contextualKeywordSource(props: SqlEditorProps): CompletionSource {
-  const dialect = props.driver === 'PostgreSQL' ? PostgreSQL : SQLite
-  const keywords = keywordCompletionSource(dialect, true)
-  return (context) => {
-    const active = completionContext(context.state.doc.toString(), context.pos)
-    if (!active || active.qualifier || active.wants === 'table' || (!context.explicit && !active.prefix)) return null
-    const setRange = (result: CompletionResult | null) =>
-      result ? { ...result, from: active.start, to: active.end } : null
-    const result = keywords(context)
-    return result instanceof Promise ? result.then(setRange) : setRange(result)
-  }
-}
-
 export default function SqlEditor(props: SqlEditorProps) {
   let host!: HTMLDivElement
   let view: EditorView | undefined
@@ -188,8 +137,11 @@ export default function SqlEditor(props: SqlEditorProps) {
 
   onMount(() => {
     const dialect = props.driver === 'PostgreSQL' ? PostgreSQL : SQLite
-    const relationCompletion = contextualCompletionSource(props)
-    const keywordCompletion = contextualKeywordSource(props)
+    const completion = createSqlCompletionSource({
+      driver: () => props.driver,
+      tables: () => props.tables,
+      loadColumns: (table) => props.onNeedColumns?.(table) ?? Promise.resolve(),
+    })
     const run = () => {
       if (!view || props.running) return true
       props.onRun(runListFor(view.state).map((statement) => statement.body))
@@ -234,9 +186,10 @@ export default function SqlEditor(props: SqlEditorProps) {
           queryNestTheme,
           statementScope,
           autocompletion({
-            override: [relationCompletion, keywordCompletion],
+            override: [completion],
             activateOnTyping: true,
             closeOnBlur: true,
+            activateOnCompletion: (item) => item.type === 'namespace' || item.type === 'variable',
           }),
           keymap.of([
             { key: 'Mod-Enter', run },
@@ -244,6 +197,7 @@ export default function SqlEditor(props: SqlEditorProps) {
             { key: 'Mod-z', run: undo },
             { key: 'Mod-Shift-z', run: redo },
             { key: 'Mod-y', run: redo },
+            { key: 'Tab', run: acceptCompletion },
             ...completionKeymap,
             ...closeBracketsKeymap,
             indentWithTab,
@@ -329,21 +283,6 @@ export default function SqlEditor(props: SqlEditorProps) {
     on(
       () => props.focusNonce,
       () => queueMicrotask(() => restoreFocus()),
-      { defer: true },
-    ),
-  )
-
-  // Refresh an open completion popup when lazy column metadata arrives.
-  createEffect(
-    on(
-      () => props.tables.map((table) => `${table.schema}.${table.name}:${table.columns.join(',')}`).join('|'),
-      () => {
-        if (!view || completionStatus(view.state) !== 'active') return
-        closeCompletion(view)
-        queueMicrotask(() => {
-          if (view) startCompletion(view)
-        })
-      },
       { defer: true },
     ),
   )

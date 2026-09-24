@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test": "node --test tests/*.test.mjs",
     "preview": "vite preview",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
@@ -23,6 +24,7 @@
   },
   "devDependencies": {
     "@material-symbols-svg/react": "^0.14.0",
+    "esbuild": "^0.28.2",
     "prettier": "^3.9.6",
     "typescript": "^5.9.2",
     "vite": "^7.1.4",

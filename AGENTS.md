@@ -19,7 +19,11 @@ QueryNest is a TablePlus-inspired desktop database client built with Go, Wails v
 - `frontend/src/App.tsx`: application shell, open-session orchestration, and global modals.
 - `frontend/src/features/workspace/DatabaseWorkspace.tsx`: database workspaces, cached table panels, local drafts, unsaved-change guards, and undo/redo history.
 - `frontend/src/features/sql-editor/sql.ts`: the SQL scanner - tokens, statement boundaries, and which statements a run covers.
-- `frontend/src/features/sql-editor/SqlEditor.tsx`: the highlighted editor, scope tint and run list.
+- `frontend/src/features/sql-editor/SqlEditor.tsx`: the CodeMirror editor, scope tint and run list.
+- `frontend/src/features/sql-editor/completion.ts`: tolerant SQL scope analysis, CTE/derived outputs, identifier handling and ranked dialect-aware completion.
+- `frontend/src/features/sql-editor/completionSource.ts`: asynchronous CodeMirror completion, insertion ranges and function caret placement.
+- `frontend/src/features/sql-editor/completionMetadata.ts`: per-workspace, schema-qualified metadata cache with request coalescing and refresh invalidation.
+- `frontend/tests/sql-completion.test.mjs`: headless regression tests against production completion modules and the CodeMirror adapter.
 - `frontend/src/features/data-grid/DataGrid.tsx`: the data grid, windowed row rendering, draft grid construction, column order/resize, cell editing, and the JSON viewer.
 - `frontend/src/lib/backend/bridge.ts`: typed Wails API surface plus browser-preview mocks.
 - `frontend/src/types.ts`: shared frontend data contracts.
@@ -66,6 +70,8 @@ The Code Review Graph databases are machine-local generated indexes and must not
 - Running sends one statement per `ExecuteQuery` call, each in its own read-only transaction, so running several does not weaken the read-only console.
 - Query results page by rewriting the query's window, and only the LIMIT and OFFSET at paren depth zero count. A LIMIT inside a subquery, a CTE body or a scalar subquery belongs to that subquery; rewriting it would change the result rather than page it. A page never reaches past the writer's own LIMIT: the last page is clipped and the next control disables. Paging is refused, rather than guessed at, when the count is not a plain integer, when the statement is not a SELECT or WITH, or when several statements run at once.
 - Completion suggests columns before tables before keywords, and never inside a string or a comment. Accepting replaces the whole word under the cursor, not just the part before it. Columns are fetched only for the tables the current statement names, and an empty cached entry must stay cached so a table that cannot be introspected is not re-fetched on every keystroke.
+- Completion must respect each subquery and compound-query scope, alias shadowing, ordered CTE visibility, correlation and LATERAL boundaries. CTE/derived columns come from their projections; never execute SQL to infer them. PostgreSQL quoted identifiers preserve case. Ambiguous physical table names require schema qualification until search-path metadata is available.
+- Metadata requests carry both schema and table name. Concurrent requests share a promise; empty/failed introspection stays cached until refresh, and stale requests cannot repopulate an invalidated cache. Completion waits for requested metadata, so the first alias-dot request works even before a popup exists. Never close and reopen completion from a metadata effect.
 - The gutter, the highlight layer and the textarea read their font, line height and padding from `--editor-*` on `.editor-wrap`. They must stay identical or the layers drift apart, which is what a separate line height and a gap did to the gutter before.
 - Grid mutations remain local drafts until the user saves them. `Ctrl+S` applies the active table's draft atomically.
 - Undo history depth comes from the `editing.undoHistoryLimit` preference (10-1000, default 100), not a literal. Read it through `props.editingPreferences` so lowering it releases memory immediately.
@@ -129,6 +135,7 @@ Run the checks relevant to every change:
 
 ```bash
 go test ./...
+npm --prefix frontend test
 npm --prefix frontend run build
 ```
 

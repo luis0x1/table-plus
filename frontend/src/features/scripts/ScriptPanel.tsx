@@ -1,8 +1,9 @@
 import { createSignal, lazy, Show, Suspense } from 'solid-js'
 import DataGrid from '../data-grid/DataGrid'
 import type { EditorSelection } from '../sql-editor/SqlEditor'
-import type { CompletionTable, PaginationPlan, SqlStatement } from '../sql-editor/sql'
-import type { QueryResult } from '../../types'
+import type { PaginationPlan, SqlStatement } from '../sql-editor/sql'
+import type { QueryResult, TableRef } from '../../types'
+import type { CompletionTable } from '../sql-editor/completion'
 import { Check, ChevronRight, Code, Play, Save, X } from '../../components/ui/icons'
 
 const SqlEditor = lazy(() => import('../sql-editor/SqlEditor'))
@@ -60,7 +61,7 @@ export default function ScriptPanel(props: {
   pageable: boolean
   onPage: (page: number) => void
   tables: CompletionTable[]
-  onNeedColumns: (table: string) => void
+  onNeedColumns: (table: TableRef) => Promise<void>
   caret: EditorSelection & { nonce: number }
   focusNonce: number
   onInput: (value: string, selection: EditorSelection) => void

@@ -20,13 +20,9 @@ import TabStrip from '../../components/navigation/TabStrip'
 import DatabasePicker from '../connections/DatabasePicker'
 import DataGrid, { buildDraftGrid, type PendingOperation } from '../data-grid/DataGrid'
 import type { EditorSelection } from '../sql-editor/SqlEditor'
-import {
-  pageQuery,
-  planPagination,
-  type CompletionTable,
-  type PaginationPlan,
-  type SqlStatement,
-} from '../sql-editor/sql'
+import type { CompletionTable } from '../sql-editor/completion'
+import { createCompletionMetadataCache } from '../sql-editor/completionMetadata'
+import { pageQuery, planPagination, type PaginationPlan, type SqlStatement } from '../sql-editor/sql'
 import type { SidebarSizing } from '../../components/layout/SidebarResizeHandle'
 import SidebarResizeHandle from '../../components/layout/SidebarResizeHandle'
 import Toast from '../../components/feedback/Toast'
@@ -346,6 +342,7 @@ export default function DatabaseWorkspace(props: {
 
   async function loadTables() {
     const next = ((await db.ListTables()) ?? []).map((item) => ({ ...item, rows: -1 }))
+    invalidateCompletionMetadata()
     setTables(next)
     loadRowCounts(next)
   }
@@ -800,34 +797,39 @@ export default function DatabaseWorkspace(props: {
     )
   }
 
-  const [columnCache, setColumnCache] = createStore<Record<string, string[]>>({})
-  const completionTables = createMemo<CompletionTable[]>(() =>
-    tables().map((item) => {
-      const key = tableKey(item)
+  const [completionMetadataVersion, setCompletionMetadataVersion] = createSignal(0)
+  const completionMetadata = createCompletionMetadataCache(
+    (table) => db.GetTableSchema(table.schema, table.name),
+    () => setCompletionMetadataVersion((version) => version + 1),
+  )
+  // Reuse loaded tab metadata until an explicit refresh invalidates that snapshot.
+  const staleCompletionSchemas = new WeakSet<ColumnInfo[]>()
+  const invalidateCompletionMetadata = () => {
+    for (const state of Object.values(tabStates)) staleCompletionSchemas.add(state.schema)
+    completionMetadata.clear()
+  }
+  onCleanup(() => completionMetadata.clear())
+  const completionTables = createMemo<CompletionTable[]>(() => {
+    completionMetadataVersion()
+    return tables().map((item) => {
+      const state = tabStates[tableKey(item)]
+      const columns =
+        state?.schemaLoaded && !staleCompletionSchemas.has(state.schema) ? state.schema : completionMetadata.get(item)
       return {
         schema: item.schema,
         name: item.name,
-        columns: tabStates[key]?.schema.map((column) => column.name) ?? columnCache[key] ?? [],
+        type: item.type,
+        columns: columns?.map((column) => column.name) ?? [],
+        columnInfo: columns,
+        columnsLoaded: columns !== undefined,
       }
-    }),
-  )
+    })
+  })
 
-  async function loadColumnsFor(name: string) {
-    const item = tables().find((table) => table.name.toLowerCase() === name.toLowerCase())
-    if (!item) return
-    const key = tableKey(item)
-    if (columnCache[key]) return
-    setColumnCache(key, [])
-    // Completion is best effort: a table that cannot be introspected simply
-    // offers no columns rather than surfacing an error mid-keystroke.
-    try {
-      setColumnCache(
-        key,
-        (await db.GetTableSchema(item.schema, item.name)).map((column) => column.name),
-      )
-    } catch {
-      /* leave the empty entry so the fetch is not retried on every keystroke */
-    }
+  async function loadColumnsFor(table: { schema: string; name: string }) {
+    const item = completionTables().find((item) => item.schema === table.schema && item.name === table.name)
+    if (!item || item.columnsLoaded) return
+    await completionMetadata.load(item)
   }
 
   const openBuffer = (name: string) => {
@@ -1991,7 +1993,7 @@ export default function DatabaseWorkspace(props: {
               pageable={Boolean(buffers[activeScript()]?.plan)}
               onPage={(page) => void runPage(activeScript(), page)}
               tables={completionTables()}
-              onNeedColumns={(name) => void loadColumnsFor(name)}
+              onNeedColumns={loadColumnsFor}
               caret={buffers[activeScript()]!.caret}
               focusNonce={editorFocusNonce()}
               onInput={recordEdit}

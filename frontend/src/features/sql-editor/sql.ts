@@ -5,7 +5,7 @@
 
 export type SqlTokenType = 'keyword' | 'string' | 'comment' | 'number' | 'quoted' | 'operator' | 'plain'
 
-export type SqlToken = { type: SqlTokenType; start: number; end: number }
+export type SqlToken = { type: SqlTokenType; start: number; end: number; closed?: boolean }
 
 export type SqlStatement = { start: number; end: number; body: string }
 
@@ -135,8 +135,8 @@ const KEYWORDS = new Set([
   'without',
 ])
 
-const identifierStart = /[A-Za-z_]/
-const identifierPart = /[A-Za-z0-9_$]/
+const identifierStart = /[\p{L}\p{Nl}_]/u
+const identifierPart = /[\p{L}\p{Nl}\p{N}\p{M}_$]/u
 const digit = /[0-9]/
 const whitespace = /\s/
 
@@ -148,6 +148,7 @@ const closingQuote: Record<string, string> = { '"': '"', '`': '`', '[': ']' }
 function readDollarTag(text: string, index: number) {
   if (text[index] !== '$') return null
   let end = index + 1
+  if (text[end] !== '$' && !identifierStart.test(text[end] ?? '')) return null
   while (end < text.length && identifierPart.test(text[end]) && text[end] !== '$') end++
   if (text[end] !== '$') return null
   return text.slice(index, end + 1)
@@ -158,7 +159,7 @@ function readDollarTag(text: string, index: number) {
  * A statement claims any comment that precedes it, because that is how a reader
  * sees it, but a trailing comment with no SQL after it is not a statement.
  */
-export function scanSql(text: string): { tokens: SqlToken[]; statements: SqlStatement[] } {
+export function scanSql(text: string, driver?: string): { tokens: SqlToken[]; statements: SqlStatement[] } {
   const tokens: SqlToken[] = []
   const statements: SqlStatement[] = []
   let index = 0
@@ -166,10 +167,10 @@ export function scanSql(text: string): { tokens: SqlToken[]; statements: SqlStat
   let hasCode = false
   let beginDepth = 0
 
-  const push = (type: SqlTokenType, start: number, end: number) => {
+  const push = (type: SqlTokenType, start: number, end: number, closed?: boolean) => {
     if (statementStart < 0) statementStart = start
     if (type !== 'comment') hasCode = true
-    tokens.push({ type, start, end })
+    tokens.push({ type, start, end, ...(closed === undefined ? {} : { closed }) })
   }
 
   const closeStatement = (end: number) => {
@@ -191,47 +192,64 @@ export function scanSql(text: string): { tokens: SqlToken[]; statements: SqlStat
     if (char === '-' && text[index + 1] === '-') {
       const newline = text.indexOf('\n', index)
       const end = newline === -1 ? text.length : newline
-      push('comment', index, end)
+      push('comment', index, end, false)
       index = end
       continue
     }
 
     if (char === '/' && text[index + 1] === '*') {
-      const close = text.indexOf('*/', index + 2)
-      const end = close === -1 ? text.length : close + 2
-      push('comment', index, end)
+      let end = index + 2
+      let depth = 1
+      while (end < text.length && depth) {
+        if (driver === 'PostgreSQL' && text.startsWith('/*', end)) {
+          depth++
+          end += 2
+        } else if (text.startsWith('*/', end)) {
+          depth--
+          end += 2
+        } else end++
+      }
+      push('comment', index, end, depth === 0)
       index = end
       continue
     }
 
-    const tag = readDollarTag(text, index)
+    const tag = driver === 'SQLite' ? null : readDollarTag(text, index)
     if (tag) {
       const close = text.indexOf(tag, index + tag.length)
       const end = close === -1 ? text.length : close + tag.length
-      push('string', index, end)
+      push('string', index, end, close !== -1)
       index = end
       continue
     }
 
     if (char === "'") {
       let end = index + 1
+      let closed = false
+      const escaped =
+        driver === 'PostgreSQL' && /[eE]/.test(text[index - 1] ?? '') && !identifierPart.test(text[index - 2] ?? '')
       while (end < text.length) {
+        if (escaped && text[end] === '\\') {
+          end = Math.min(text.length, end + 2)
+          continue
+        }
         if (text[end] === "'") {
           if (text[end + 1] === "'") {
             end += 2
             continue
           }
           end++
+          closed = true
           break
         }
         end++
       }
-      push('string', index, end)
+      push('string', index, end, closed)
       index = end
       continue
     }
 
-    const closer = closingQuote[char]
+    const closer = driver === 'PostgreSQL' && char !== '"' ? undefined : closingQuote[char]
     if (closer) {
       let end = index + 1
       while (end < text.length) {
@@ -263,9 +281,13 @@ export function scanSql(text: string): { tokens: SqlToken[]; statements: SqlStat
       continue
     }
 
-    if (identifierStart.test(char)) {
+    if (identifierStart.test(String.fromCodePoint(text.codePointAt(index)!))) {
       let end = index
-      while (end < text.length && identifierPart.test(text[end])) end++
+      while (end < text.length) {
+        const part = String.fromCodePoint(text.codePointAt(end)!)
+        if (!identifierPart.test(part)) break
+        end += part.length
+      }
       const word = text.slice(index, end).toLowerCase()
       const keyword = KEYWORDS.has(word)
       if (keyword && word === 'begin' && statementStart >= 0 && triggerHeader.test(text.slice(statementStart, index)))
@@ -327,147 +349,6 @@ export function summarizeStatement(body: string, limit = 46): string {
   const collapsed = withoutComments.replace(/\s+/g, ' ').replace(/;\s*$/, '').trim()
   if (!collapsed) return '(comment only)'
   return collapsed.length > limit ? collapsed.slice(0, limit - 1).trimEnd() + '…' : collapsed
-}
-
-export type CompletionKind = 'keyword' | 'table' | 'column'
-
-export type Completion = { label: string; detail: string; kind: CompletionKind }
-
-export type CompletionTable = { schema: string; name: string; columns: string[] }
-
-export type CompletionContext = {
-  /** The word under the caret, which the accepted suggestion replaces whole. */
-  prefix: string
-  start: number
-  end: number
-  /** The table or alias before a dot, when the caret follows one. */
-  qualifier: string
-  wants: CompletionKind | 'any'
-  statement?: SqlStatement
-}
-
-const identifierChar = /[A-Za-z0-9_]/
-// After these, a name is a relation rather than a column.
-const relationKeywords = new Set(['from', 'join', 'into', 'update', 'table'])
-
-/**
- * tableAliases maps the aliases a statement introduces back to their tables, so
- * `c.` after `FROM customers c` can offer that table's columns.
- */
-export function tableAliases(statement: string): Record<string, string> {
-  const { tokens } = scanSql(statement)
-  const words = tokens.filter((token) => token.type === 'keyword' || token.type === 'plain' || token.type === 'quoted')
-  const unquote = (value: string) => (/^["`[]/.test(value) ? value.slice(1, -1) : value)
-  const aliases: Record<string, string> = {}
-  for (let index = 0; index < words.length; index++) {
-    const word = statement.slice(words[index].start, words[index].end).toLowerCase()
-    if (words[index].type !== 'keyword' || (word !== 'from' && word !== 'join' && word !== 'update')) continue
-    let position = index + 1
-    if (position >= words.length || words[position].type === 'keyword') continue
-    let table = unquote(statement.slice(words[position].start, words[position].end))
-    // A qualified name spends two more tokens on the dot and the table.
-    if (statement[words[position].end] === '.' && words[position + 1]) {
-      position += 1
-      table = unquote(statement.slice(words[position].start, words[position].end))
-    }
-    aliases[table.toLowerCase()] = table
-    let next = words[position + 1]
-    if (next && next.type === 'keyword' && statement.slice(next.start, next.end).toLowerCase() === 'as')
-      next = words[position + 2]
-    if (next && next.type !== 'keyword') {
-      const alias = unquote(statement.slice(next.start, next.end))
-      if (alias && !alias.includes('(')) aliases[alias.toLowerCase()] = table
-    }
-  }
-  return aliases
-}
-
-/**
- * completionContext describes what the caret is asking for, or null where
- * suggesting anything would be wrong - inside a string or a comment.
- */
-export function completionContext(text: string, caret: number): CompletionContext | null {
-  const { tokens, statements } = scanSql(text)
-  // The end of a comment line, and the end of a string still being typed, are
-  // both inside it, so the upper bound is inclusive.
-  const enclosing = tokens.find((token) => caret > token.start && caret <= token.end)
-  if (enclosing && (enclosing.type === 'string' || enclosing.type === 'comment')) return null
-
-  let start = caret
-  while (start > 0 && identifierChar.test(text[start - 1])) start--
-  // Accepting replaces the whole word, so a completion taken mid-word does not
-  // leave its tail behind.
-  let end = caret
-  while (end < text.length && identifierChar.test(text[end])) end++
-  const prefix = text.slice(start, caret)
-
-  let qualifier = ''
-  if (text[start - 1] === '.') {
-    let qualifierStart = start - 1
-    while (qualifierStart > 0 && identifierChar.test(text[qualifierStart - 1])) qualifierStart--
-    qualifier = text.slice(qualifierStart, start - 1)
-  }
-
-  // The last keyword before the word decides whether a relation is expected.
-  let wants: CompletionContext['wants'] = qualifier ? 'column' : 'any'
-  if (!qualifier) {
-    const previous = [...tokens].reverse().find((token) => token.end <= start && token.type === 'keyword')
-    if (previous && relationKeywords.has(text.slice(previous.start, previous.end).toLowerCase())) wants = 'table'
-  }
-
-  const statement = statements.find((item) => caret >= item.start && caret <= item.end)
-  return { prefix, start, end, qualifier, wants, statement }
-}
-
-function rank(label: string, prefix: string): number {
-  if (!prefix) return 1
-  const haystack = label.toLowerCase()
-  const needle = prefix.toLowerCase()
-  if (haystack.startsWith(needle)) return 0
-  return haystack.includes(needle) ? 1 : -1
-}
-
-/** sqlCompletions builds the suggestion list for a context, best match first. */
-export function sqlCompletions(context: CompletionContext, tables: CompletionTable[], limit = 40): Completion[] {
-  const aliases = context.statement ? tableAliases(context.statement.body) : {}
-  const findTable = (name: string) => {
-    const target = (aliases[name.toLowerCase()] ?? name).toLowerCase()
-    return tables.find((table) => table.name.toLowerCase() === target)
-  }
-
-  const candidates: Completion[] = []
-  if (context.qualifier) {
-    const table = findTable(context.qualifier)
-    for (const column of table?.columns ?? []) candidates.push({ label: column, detail: table!.name, kind: 'column' })
-  } else {
-    for (const table of tables) candidates.push({ label: table.name, detail: table.schema, kind: 'table' })
-    if (context.wants !== 'table') {
-      // Columns of the tables this statement already mentions come before
-      // keywords, because they are what the writer is most likely reaching for.
-      const mentioned = new Set(Object.values(aliases).map((name) => name.toLowerCase()))
-      for (const table of tables) {
-        if (!mentioned.has(table.name.toLowerCase())) continue
-        for (const column of table.columns) candidates.push({ label: column, detail: table.name, kind: 'column' })
-      }
-      for (const keyword of KEYWORDS)
-        candidates.push({ label: keyword.toUpperCase(), detail: 'keyword', kind: 'keyword' })
-    }
-  }
-
-  const order: Record<CompletionKind, number> = { column: 0, table: 1, keyword: 2 }
-  const seen = new Set<string>()
-  return candidates
-    .map((item) => ({ item, score: rank(item.label, context.prefix) }))
-    .filter((entry) => entry.score >= 0)
-    .sort((a, b) => a.score - b.score || order[a.item.kind] - order[b.item.kind])
-    .filter((entry) => {
-      const key = `${entry.item.kind}:${entry.item.label.toLowerCase()}`
-      if (seen.has(key)) return false
-      seen.add(key)
-      return true
-    })
-    .slice(0, limit)
-    .map((entry) => entry.item)
 }
 
 export type PaginationPlan = {
