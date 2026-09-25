@@ -278,6 +278,15 @@ func decodeWireValue(value any) (any, error) {
 	default:
 		return value, nil
 	}
+	if kind == "float64" {
+		// Only non-finite floats use the tagged representation.
+		switch encoded {
+		case "+Inf", "-Inf", "NaN":
+			return strconv.ParseFloat(encoded, 64)
+		default:
+			return nil, fmt.Errorf("invalid non-finite float64 value %q", encoded)
+		}
+	}
 	if kind != "int64" {
 		return nil, fmt.Errorf("unsupported typed database value %q", kind)
 	}

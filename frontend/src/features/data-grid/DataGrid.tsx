@@ -1,6 +1,9 @@
+import Presence from '../../components/ui/Presence'
 import { createEffect, createSignal, Index, mergeProps, on, onCleanup, Show, type JSX } from 'solid-js'
-import type { ColumnInfo, RowOperation, TableData, WireInt64 } from '../../types'
+import type { ColumnInfo, RowOperation, TableData } from '../../types'
 import { Alert, ArrowDown, ArrowUp, Check, Code, Columns, X } from '../../components/ui/icons'
+
+import { cellText, editedValue, isWireNumber, jsonText } from './cellValue'
 
 export type PendingOperation = RowOperation & { id: string }
 
@@ -34,48 +37,9 @@ type DataGridProps = {
 
 function formatCell(value: unknown): JSX.Element {
   if (value === null || value === undefined) return <span class="null-value">NULL</span>
-  if (isWireInt64(value)) return value.value
+  if (isWireNumber(value)) return value.value
   if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
-}
-
-function isWireInt64(value: unknown): value is WireInt64 {
-  return (
-    value !== null &&
-    typeof value === 'object' &&
-    (value as Partial<WireInt64>).type === 'int64' &&
-    typeof (value as Partial<WireInt64>).value === 'string'
-  )
-}
-
-function cellText(value: unknown): string {
-  return isWireInt64(value) ? value.value : String(value ?? '')
-}
-
-function jsonText(value: unknown): string | null {
-  if (isWireInt64(value)) return null
-  if (value !== null && typeof value === 'object') return JSON.stringify(value, null, 2)
-  if (typeof value !== 'string') return null
-  const trimmed = value.trim()
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null
-  try {
-    return JSON.stringify(JSON.parse(trimmed), null, 2)
-  } catch {
-    return null
-  }
-}
-
-function editedValue(text: string, original: unknown): unknown {
-  if (text.trim().toLowerCase() === 'null') return null
-  if (isWireInt64(original) && /^-?\d+$/.test(text.trim())) {
-    return { type: 'int64', value: text.trim() } satisfies WireInt64
-  }
-  if (typeof original === 'number') {
-    const number = Number(text)
-    return Number.isNaN(number) ? text : number
-  }
-  if (typeof original === 'boolean') return text.toLowerCase() === 'true'
-  return text
 }
 
 function primaryKeyFor(row: unknown[], columns: string[], schema: ColumnInfo[]) {
@@ -460,7 +424,7 @@ export default function DataGrid(raw: DataGridProps) {
             </Show>
           </tbody>
         </table>
-        <Show when={jsonCell()}>
+        <Presence when={jsonCell()}>
           {(cell) => (
             <JsonModal
               value={cell().value}
@@ -476,7 +440,7 @@ export default function DataGrid(raw: DataGridProps) {
               }
             />
           )}
-        </Show>
+        </Presence>
       </div>
     </Show>
   )

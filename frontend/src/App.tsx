@@ -1,3 +1,4 @@
+import Presence from './components/ui/Presence'
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js'
 import { api } from './lib/backend/bridge'
 import useSidebarPreferences, {
@@ -452,7 +453,7 @@ export default function App() {
         </div>
       </Show>
       <Show when={error()}>{(message) => <Toast message={message()} onClose={() => setError('')} />}</Show>
-      <Show when={connectionOpen()}>
+      <Presence when={connectionOpen()}>
         <ConnectionModal
           config={connectionConfig()}
           setConfig={setConnectionConfig}
@@ -466,8 +467,8 @@ export default function App() {
           onError={setError}
           onClose={() => setConnectionOpen(false)}
         />
-      </Show>
-      <Show when={editingConnection()}>
+      </Presence>
+      <Presence when={editingConnection()}>
         {(profile) => (
           <SavedConnectionEditModal
             profile={profile()}
@@ -476,13 +477,13 @@ export default function App() {
             onClose={() => setEditingConnection(null)}
           />
         )}
-      </Show>
-      <Show when={failedConnection()}>
+      </Presence>
+      <Presence when={failedConnection()}>
         {(session) => (
           <ConnectionFailureModal session={session()} onEdit={editFailedConnection} onClose={closeFailedConnection} />
         )}
-      </Show>
-      <Show when={appearanceOpen()}>
+      </Presence>
+      <Presence when={appearanceOpen()}>
         <AppearanceModal
           appearance={sidebarPreferences.appearance()}
           transfer={sidebarPreferences.transfer()}
@@ -497,7 +498,7 @@ export default function App() {
           onReset={resetSettings}
           onClose={() => setAppearanceOpen(false)}
         />
-      </Show>
+      </Presence>
     </div>
   )
 }

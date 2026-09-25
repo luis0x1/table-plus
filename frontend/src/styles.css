@@ -679,7 +679,6 @@ kbd {
 }
 .object-children {
   transform-origin: top;
-  animation: reveal-children var(--motion-base) var(--ease-out) backwards;
 }
 .group-title {
   width: 100%;
@@ -2169,7 +2168,6 @@ kbd {
   display: flex;
   flex-direction: column;
   background: #0f1216;
-  animation: panel-in 300ms var(--ease-out) backwards;
 }
 .script-panel-head {
   height: 43px;
@@ -3948,7 +3946,7 @@ button.kind-card:hover {
   border-radius: 13px;
   background: #12161b;
   box-shadow: 0 30px 90px rgba(0, 0, 0, 0.68);
-  animation: modal-in 320ms var(--ease-spring) backwards;
+  animation: modal-in 180ms var(--ease-out) backwards;
 }
 .transfer-modal > header {
   min-height: 64px;
@@ -4243,7 +4241,7 @@ button.kind-card:hover {
   border-radius: 13px;
   background: #17191e;
   box-shadow: 0 30px 90px rgba(0, 0, 0, 0.68);
-  animation: modal-in 320ms var(--ease-spring) backwards;
+  animation: modal-in 180ms var(--ease-out) backwards;
 }
 .danger-confirm-icon {
   width: 43px;
@@ -4332,7 +4330,7 @@ button.kind-card:hover {
   border-radius: 13px;
   background: #17191e;
   box-shadow: 0 30px 90px rgba(0, 0, 0, 0.68);
-  animation: modal-in 360ms var(--ease-spring) backwards;
+  animation: modal-in 180ms var(--ease-out) backwards;
 }
 .connection-failure-icon {
   width: 46px;
@@ -4400,21 +4398,11 @@ button.kind-card:hover {
 }
 
 /* Motion system: quick spatial cues that keep the dense workspace feeling responsive. */
-button:not(:disabled):active {
+button:not(:disabled):not(.object-row):active {
   transform: scale(0.97);
   transition-duration: 70ms;
 }
-.workspace {
-  animation: workspace-in 320ms var(--ease-out) backwards;
-}
-.sidebar {
-  animation: sidebar-in 360ms var(--ease-out) backwards;
-}
-.main-panel {
-  animation: panel-in 300ms var(--ease-out) backwards;
-}
 .connection-card {
-  animation: rise-in 340ms 70ms var(--ease-out) backwards;
   transition:
     border-color var(--motion-base) ease,
     background-color var(--motion-base) ease,
@@ -4434,18 +4422,6 @@ button:not(:disabled):active {
   color: #a3abb5;
   transform: translateY(1px);
 }
-.online-dot {
-  animation: online-pulse 2.8s ease-in-out infinite;
-}
-.side-search {
-  animation: rise-in 340ms 110ms var(--ease-out) backwards;
-}
-.object-group {
-  animation: rise-in 300ms var(--ease-out) backwards;
-}
-.object-group:nth-child(2) {
-  animation-delay: 45ms;
-}
 .group-title svg {
   transition:
     color var(--motion-fast) ease,
@@ -4460,13 +4436,6 @@ button:not(:disabled):active {
     color var(--motion-fast) ease,
     background-color var(--motion-fast) ease,
     transform var(--motion-fast) var(--ease-out);
-  animation: row-in 260ms var(--ease-out) backwards;
-}
-.object-row {
-  animation-delay: min(calc(var(--stagger, 0) * 22ms), 220ms);
-}
-.object-row:hover {
-  transform: translateX(2px);
 }
 .object-row::before {
   transform: scaleY(0);
@@ -4480,12 +4449,6 @@ button:not(:disabled):active {
   transition:
     color var(--motion-fast) ease,
     transform var(--motion-base) var(--ease-spring);
-}
-.object-row:hover svg {
-  transform: scale(1.08);
-}
-.sidebar-footer {
-  animation: rise-in 320ms 160ms var(--ease-out) backwards;
 }
 .sidebar-footer svg,
 .tool-button svg,
@@ -4510,7 +4473,6 @@ button:not(:disabled):active {
   transform: scale(1.16);
 }
 .tab {
-  animation: tab-in 280ms var(--ease-out) backwards;
   transition:
     color var(--motion-fast) ease,
     background-color var(--motion-fast) ease,
@@ -4529,10 +4491,6 @@ button:not(:disabled):active {
 .tab.active::after,
 .view-switch button.active::after {
   transform-origin: center;
-  animation: underline-in 300ms var(--ease-spring) backwards;
-}
-.tab-change-dot {
-  animation: change-pulse 1.8s ease-in-out infinite;
 }
 .query-tab,
 .view-switch button,
@@ -4553,12 +4511,6 @@ button:not(:disabled):active {
 .page-controls button:hover:not(:disabled) {
   transform: translateY(-1px);
 }
-.content-header > div:first-child {
-  animation: header-in 340ms var(--ease-out) backwards;
-}
-.header-actions {
-  animation: actions-in 340ms 55ms var(--ease-out) backwards;
-}
 .content-header h2 span {
   transition:
     color var(--motion-fast) ease,
@@ -4569,9 +4521,6 @@ button:not(:disabled):active {
   color: #9e91d9;
   border-color: rgba(124, 92, 255, 0.35);
   background: rgba(124, 92, 255, 0.05);
-}
-.data-toolbar {
-  animation: fade-in 300ms 45ms var(--ease-out) backwards;
 }
 .record-search {
   transition:
@@ -4595,7 +4544,6 @@ button:not(:disabled):active {
   transform: rotate(90deg);
 }
 .save-changes {
-  animation: save-in 320ms var(--ease-spring) backwards;
   transition:
     color var(--motion-fast) ease,
     background-color var(--motion-fast) ease,
@@ -4607,22 +4555,11 @@ button:not(:disabled):active {
   transform: translateY(-1px);
   box-shadow: 0 6px 16px rgba(199, 155, 43, 0.09);
 }
-.save-changes b {
-  animation: count-in 350ms var(--ease-spring) backwards;
-}
-
-.content-body > .grid-scroll,
-.content-body > .schema-wrap {
-  animation: content-in 300ms var(--ease-out) backwards;
-}
 .data-grid th {
   transition:
     color var(--motion-fast) ease,
     background-color var(--motion-fast) ease,
     opacity var(--motion-fast) ease;
-}
-.data-grid th > svg {
-  animation: sort-in 260ms var(--ease-spring) backwards;
 }
 .column-resizer::after {
   transform: scaleY(0);
@@ -4639,19 +4576,6 @@ button:not(:disabled):active {
     border-color var(--motion-fast) ease,
     box-shadow var(--motion-fast) ease;
 }
-.data-grid tbody tr {
-  animation: grid-row-in 260ms var(--ease-out) backwards;
-}
-.data-grid tbody tr {
-  animation-delay: min(calc(var(--stagger, 0) * 18ms), 200ms);
-}
-/* Spacer rows carry the height of the rows outside the window; they are not content. */
-.data-grid tbody tr.grid-spacer {
-  animation: none;
-}
-.cell-editor {
-  animation: editor-in 180ms var(--ease-spring) backwards;
-}
 .json-cell,
 .status-pill,
 .row-selector {
@@ -4664,20 +4588,8 @@ button:not(:disabled):active {
 .json-cell:hover {
   transform: translateX(1px);
 }
-.selected .row-selector {
-  animation: select-in 240ms var(--ease-spring) backwards;
-}
 .loading-bar::after {
   background: linear-gradient(90deg, transparent, #8b72ff 28%, #bcadff 50%, #8b72ff 72%, transparent);
-}
-.pagination {
-  animation: rise-in 280ms var(--ease-out) backwards;
-}
-.schema-table tbody tr {
-  animation: grid-row-in 260ms var(--ease-out) backwards;
-}
-.schema-table tbody tr {
-  animation-delay: min(calc(var(--stagger, 0) * 25ms), 250ms);
 }
 .schema-table td,
 .field-icon {
@@ -4697,10 +4609,6 @@ button:not(:disabled):active {
 
 .query-panel {
   transform-origin: bottom;
-  animation: query-in 360ms var(--ease-out) backwards;
-}
-.query-workspace {
-  animation: fade-in 280ms 70ms var(--ease-out) backwards;
 }
 .run-query {
   transition:
@@ -4711,10 +4619,6 @@ button:not(:disabled):active {
 .run-query:hover {
   transform: translateY(-1px);
   box-shadow: 0 7px 18px rgba(82, 52, 203, 0.24);
-}
-.result-meta,
-.result-placeholder {
-  animation: fade-in 260ms var(--ease-out) backwards;
 }
 
 .welcome::before {
@@ -4761,12 +4665,7 @@ button:not(:disabled):active {
 .appearance-modal,
 .json-modal,
 .unsaved-modal {
-  animation: modal-in 360ms var(--ease-spring) backwards;
-}
-.modal-mark,
-.json-braces,
-.unsaved-icon {
-  animation: mark-in 400ms 80ms var(--ease-spring) backwards;
+  animation: modal-in 180ms var(--ease-out) backwards;
 }
 .kind-card,
 .saved-row {
@@ -4810,9 +4709,6 @@ button:not(:disabled):active {
 .json-error {
   animation: error-in 260ms var(--ease-out) backwards;
 }
-.pending-summary {
-  animation: count-in 360ms 100ms var(--ease-spring) backwards;
-}
 .toast {
   animation: toast-in 420ms var(--ease-spring) backwards;
 }
@@ -4820,34 +4716,32 @@ button:not(:disabled):active {
   animation: alert-in 520ms 110ms var(--ease-spring) backwards;
 }
 
-@keyframes workspace-in {
-  from {
-    opacity: 0.72;
-  }
-  to {
-    opacity: 1;
-  }
+/* Presence retains the last overlay content only for its exit animation. */
+.presence {
+  display: contents;
 }
-@keyframes sidebar-in {
-  from {
+.presence[inert] > * {
+  pointer-events: none;
+  animation: overlay-out var(--presence-duration) ease-in forwards;
+}
+.presence[inert] > .modal-backdrop {
+  animation-name: backdrop-out;
+}
+.presence[inert] > .modal-backdrop > section {
+  animation: overlay-out var(--presence-duration) ease-in forwards;
+}
+@keyframes overlay-out {
+  to {
     opacity: 0;
-    transform: translateX(-18px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
+    transform: translateY(4px) scale(0.98);
   }
 }
-@keyframes panel-in {
-  from {
-    opacity: 0.6;
-    transform: translateX(8px);
-  }
+@keyframes backdrop-out {
   to {
-    opacity: 1;
-    transform: translateX(0);
+    opacity: 0;
   }
 }
+
 @keyframes mark-in {
   from {
     opacity: 0;
@@ -4876,162 +4770,7 @@ button:not(:disabled):active {
     opacity: 1;
   }
 }
-@keyframes reveal-children {
-  from {
-    opacity: 0;
-    transform: translateY(-5px) scaleY(0.96);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scaleY(1);
-  }
-}
-@keyframes row-in {
-  from {
-    opacity: 0;
-    transform: translateX(-6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-@keyframes online-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 4px rgba(78, 212, 165, 0.4);
-  }
-  50% {
-    box-shadow: 0 0 9px rgba(78, 212, 165, 0.7);
-  }
-}
-@keyframes tab-in {
-  from {
-    opacity: 0;
-    transform: translateY(-5px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-@keyframes underline-in {
-  from {
-    transform: scaleX(0);
-    opacity: 0.4;
-  }
-  to {
-    transform: scaleX(1);
-    opacity: 1;
-  }
-}
-@keyframes change-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 4px rgba(230, 187, 72, 0.25);
-  }
-  50% {
-    box-shadow: 0 0 9px rgba(230, 187, 72, 0.55);
-  }
-}
-@keyframes header-in {
-  from {
-    opacity: 0;
-    transform: translateX(-8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-@keyframes actions-in {
-  from {
-    opacity: 0;
-    transform: translateX(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-@keyframes save-in {
-  from {
-    opacity: 0;
-    transform: scale(0.86);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-@keyframes count-in {
-  from {
-    opacity: 0;
-    transform: scale(0.65);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-@keyframes content-in {
-  from {
-    opacity: 0;
-    transform: translateY(5px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-@keyframes grid-row-in {
-  from {
-    opacity: 0;
-    transform: translateY(3px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-@keyframes sort-in {
-  from {
-    opacity: 0;
-    transform: translateY(3px) scale(0.7);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-@keyframes editor-in {
-  from {
-    opacity: 0.4;
-    transform: scale(0.98);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-@keyframes select-in {
-  from {
-    transform: scale(0.72);
-  }
-  to {
-    transform: scale(1);
-  }
-}
-@keyframes query-in {
-  from {
-    opacity: 0;
-    transform: translateY(20px) scaleY(0.94);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scaleY(1);
-  }
-}
+
 @keyframes grid-drift {
   to {
     background-position: 52px 52px;

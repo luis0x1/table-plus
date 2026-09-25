@@ -1,3 +1,4 @@
+import Presence from '../../components/ui/Presence'
 import {
   batch,
   createEffect,
@@ -1601,34 +1602,32 @@ export default function DatabaseWorkspace(props: {
               <div class="object-tree">
                 <Show when={!loadingTables()} fallback={<SidebarSkeleton />}>
                   <ObjectGroup label="Tables" count={tableItems().length}>
-                    <For each={tableItems()}>
-                      {(item, index) => (
+                    <Index each={tableItems()}>
+                      {(item) => (
                         <ObjectRow
-                          item={item}
-                          stagger={index()}
-                          countLoading={countingTables().has(tableKey(item))}
-                          active={activeTable() === tableKey(item)}
-                          selected={selectedTables().has(tableKey(item))}
-                          onClick={(event) => selectTable(event, item)}
-                          onContextMenu={(event) => showTableContextMenu(event, item)}
+                          item={item()}
+                          countLoading={countingTables().has(tableKey(item()))}
+                          active={activeTable() === tableKey(item())}
+                          selected={selectedTables().has(tableKey(item()))}
+                          onClick={(event) => selectTable(event, item())}
+                          onContextMenu={(event) => showTableContextMenu(event, item())}
                         />
                       )}
-                    </For>
+                    </Index>
                   </ObjectGroup>
                   <ObjectGroup label="Views" count={viewItems().length}>
-                    <For each={viewItems()}>
-                      {(item, index) => (
+                    <Index each={viewItems()}>
+                      {(item) => (
                         <ObjectRow
-                          item={item}
-                          stagger={index()}
-                          countLoading={countingTables().has(tableKey(item))}
-                          active={activeTable() === tableKey(item)}
+                          item={item()}
+                          countLoading={countingTables().has(tableKey(item()))}
+                          active={activeTable() === tableKey(item())}
                           selected={false}
-                          onClick={(event) => selectTable(event, item)}
-                          onContextMenu={(event) => showTableContextMenu(event, item)}
+                          onClick={(event) => selectTable(event, item())}
+                          onContextMenu={(event) => showTableContextMenu(event, item())}
                         />
                       )}
-                    </For>
+                    </Index>
                   </ObjectGroup>
                 </Show>
               </div>
@@ -2009,25 +2008,29 @@ export default function DatabaseWorkspace(props: {
       </div>
       <Show when={error()}>{(message) => <Toast message={message()} onClose={() => setError('')} />}</Show>
 
-      <Show when={contextMenu() && menuActions().length > 0}>
-        <ContextMenu
-          x={contextMenu()!.x}
-          y={contextMenu()!.y}
-          label={
-            contextMenu()!.kind === 'tab'
-              ? 'Tab actions'
-              : contextMenu()!.kind === 'database'
-                ? 'Database actions'
-                : contextMenu()!.kind === 'script'
-                  ? 'Script actions'
-                  : 'Table actions'
-          }
-          actions={menuActions()}
-          onClose={closeContextMenu}
-        />
-      </Show>
+      <Presence
+        when={contextMenu() && menuActions().length > 0 ? { menu: contextMenu()!, actions: menuActions() } : null}
+      >
+        {(current) => (
+          <ContextMenu
+            x={current().menu.x}
+            y={current().menu.y}
+            label={
+              current().menu.kind === 'tab'
+                ? 'Tab actions'
+                : current().menu.kind === 'database'
+                  ? 'Database actions'
+                  : current().menu.kind === 'script'
+                    ? 'Script actions'
+                    : 'Table actions'
+            }
+            actions={current().actions}
+            onClose={closeContextMenu}
+          />
+        )}
+      </Presence>
 
-      <Show when={guardedAction()}>
+      <Presence when={guardedAction()}>
         {(action) => (
           <UnsavedModal
             title={action().title}
@@ -2054,8 +2057,8 @@ export default function DatabaseWorkspace(props: {
             }}
           />
         )}
-      </Show>
-      <Show when={scriptGuard()}>
+      </Presence>
+      <Presence when={scriptGuard()}>
         {(guard) => (
           <UnsavedModal
             title="Unsaved script"
@@ -2079,8 +2082,8 @@ export default function DatabaseWorkspace(props: {
             }}
           />
         )}
-      </Show>
-      <Show when={transferDialog()}>
+      </Presence>
+      <Presence when={transferDialog()}>
         {(dialog) => (
           <TransferModal
             state={dialog()}
@@ -2090,8 +2093,8 @@ export default function DatabaseWorkspace(props: {
             onRun={() => void runTransfer()}
           />
         )}
-      </Show>
-      <Show when={confirmAction()}>
+      </Presence>
+      <Presence when={confirmAction()}>
         {(action) => (
           <DangerConfirmModal
             title={action().title}
@@ -2101,7 +2104,7 @@ export default function DatabaseWorkspace(props: {
             onConfirm={() => void action().run()}
           />
         )}
-      </Show>
+      </Presence>
       <Show when={operationNotice()}>
         {(notice) => <OperationToast message={notice()} onClose={() => setOperationNotice('')} />}
       </Show>

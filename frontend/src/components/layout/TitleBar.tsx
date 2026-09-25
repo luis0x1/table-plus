@@ -1,3 +1,4 @@
+import Presence from '../ui/Presence'
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js'
 import { isDesktop, windowAction } from '../../lib/backend/bridge'
 import type { DatabaseActivity } from '../../features/workspace/DatabaseWorkspace'
@@ -55,7 +56,7 @@ function ActivityCenter(props: {
           <b>{props.activities.length > 9 ? '9+' : props.activities.length}</b>
         </Show>
       </button>
-      <Show when={open()}>
+      <Presence when={open()}>
         <section class="activity-popover" onDblClick={(event) => event.stopPropagation()}>
           <header>
             <div>
@@ -123,7 +124,7 @@ function ActivityCenter(props: {
             </div>
           </Show>
         </section>
-      </Show>
+      </Presence>
     </div>
   )
 }

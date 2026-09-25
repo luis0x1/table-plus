@@ -1,3 +1,4 @@
+import Presence from '../../components/ui/Presence'
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js'
 import type { AppearancePreferences, EditingPreferences, TransferPreferences } from '../../types'
 import {
@@ -96,7 +97,7 @@ function FontPicker(props: {
         </span>
         <ChevronDown size={15} />
       </button>
-      <Show when={open()}>
+      <Presence when={open()}>
         <div class="font-picker-popover">
           <label class="font-picker-search">
             <Search size={14} />
@@ -157,7 +158,7 @@ function FontPicker(props: {
             </button>
           </footer>
         </div>
-      </Show>
+      </Presence>
     </div>
   )
 }

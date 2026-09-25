@@ -6,6 +6,7 @@ import (
 	sqldriver "database/sql/driver"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -126,7 +127,8 @@ type QueryResult struct {
 
 // WireValue carries database scalars that JSON cannot represent losslessly.
 // JavaScript numbers cannot distinguish adjacent int64 primary keys above 2^53,
-// so their decimal representation stays a string end to end.
+// so their decimal representation stays a string end to end. Non-finite floats
+// also need a tagged string: encoding/json rejects NaN and infinities.
 type WireValue struct {
 	Type  string `json:"type"`
 	Value string `json:"value"`
@@ -1063,6 +1065,10 @@ func scanRowsLimited(rows *sql.Rows, max int) (TableData, error) {
 					return TableData{}, errors.New("query result exceeds the configured byte budget")
 				}
 				resultBytes += len(value)
+			case float64:
+				if math.IsInf(value, 0) || math.IsNaN(value) {
+					values[i] = WireValue{Type: "float64", Value: strconv.FormatFloat(value, 'g', -1, 64)}
+				}
 			case int64:
 				const maxSafeJavaScriptInteger = int64(1<<53 - 1)
 				if value > maxSafeJavaScriptInteger || value < -maxSafeJavaScriptInteger {

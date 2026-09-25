@@ -1,3 +1,4 @@
+import Presence from '../ui/Presence'
 import { createEffect, createSignal, createUniqueId, Index, onCleanup, onMount, Show } from 'solid-js'
 import { X } from '../ui/icons'
 
@@ -40,7 +41,7 @@ export default function QuickPagePicker(props: {
       >
         Page {props.currentPage} of {props.totalPages}
       </button>
-      <Show when={open()}>
+      <Presence when={open()}>
         <QuickPagePopover
           currentPage={props.currentPage}
           totalPages={props.totalPages}
@@ -50,7 +51,7 @@ export default function QuickPagePicker(props: {
             if (page !== props.currentPage) props.onSelect(page)
           }}
         />
-      </Show>
+      </Presence>
     </div>
   )
 }

@@ -25,6 +25,13 @@ export interface WireInt64 {
   value: string
 }
 
+export interface WireFloat64 {
+  type: 'float64'
+  value: '+Inf' | '-Inf' | 'NaN'
+}
+
+export type WireNumber = WireInt64 | WireFloat64
+
 export interface TransferTablePreview {
   schema: string
   name: string

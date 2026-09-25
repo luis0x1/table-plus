@@ -1,3 +1,4 @@
+import Presence from '../../components/ui/Presence'
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show, type Setter } from 'solid-js'
 import { api } from '../../lib/backend/bridge'
 import type { PostgresConfig, SavedConnection, SavedConnectionUpdate } from '../../types'
@@ -292,7 +293,7 @@ function CustomSelect(props: {
         <span>{selected()?.label}</span>
         <ChevronDown size={14} />
       </button>
-      <Show when={open()}>
+      <Presence when={open()}>
         <div class="custom-select-menu" role="listbox" aria-label={props.label}>
           <For each={props.options}>
             {(option) => (
@@ -329,7 +330,7 @@ function CustomSelect(props: {
             )}
           </For>
         </div>
-      </Show>
+      </Presence>
     </div>
   )
 }

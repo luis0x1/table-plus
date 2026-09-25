@@ -1,3 +1,4 @@
+import Presence from '../../components/ui/Presence'
 import { createEffect, createSignal, For, onCleanup, Show } from 'solid-js'
 import { api } from '../../lib/backend/bridge'
 import type { ConnectionStatus } from '../../types'
@@ -104,7 +105,7 @@ export default function DatabasePicker(props: { status: ConnectionStatus; onSele
         <span>{props.status.database}</span>
         <ChevronDown size={13} class={open() ? '' : 'flip-vertical'} />
       </button>
-      <Show when={open()}>
+      <Presence when={open()}>
         <section class="database-menu" role="dialog" aria-label="Databases">
           <header>
             <b>Databases</b>
@@ -227,7 +228,7 @@ export default function DatabasePicker(props: { status: ConnectionStatus; onSele
             </Show>
           </Show>
         </section>
-      </Show>
+      </Presence>
     </div>
   )
 }

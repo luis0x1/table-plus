@@ -29,7 +29,6 @@ export function ObjectGroup(props: { label: string; count: number; children: JSX
 
 export function ObjectRow(props: {
   item: TableSummary
-  stagger: number
   active: boolean
   selected: boolean
   countLoading: boolean
@@ -40,7 +39,6 @@ export function ObjectRow(props: {
     <button
       title={`${props.item.schema}.${props.item.name}`}
       aria-selected={props.selected}
-      style={{ '--stagger': String(props.stagger) }}
       class={`object-row ${props.active ? 'active' : ''} ${props.selected ? 'selected' : ''}`}
       onClick={props.onClick}
       onContextMenu={props.onContextMenu}
@@ -85,6 +83,7 @@ export function ContextMenu(props: {
       if (!menu?.contains(event.target as Node)) props.onClose()
     }
     const keyboard = (event: KeyboardEvent) => {
+      if (menu.closest('[inert]')) return
       if (event.key === 'Escape') {
         event.preventDefault()
         props.onClose()
