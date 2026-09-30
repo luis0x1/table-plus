@@ -1,5 +1,10 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js'
-import type { AppearancePreferences, EditingPreferences, TransferPreferences } from '../../types'
+import type {
+  AppearancePreferences,
+  CrashReportingPreferences,
+  EditingPreferences,
+  TransferPreferences,
+} from '../../types'
 import {
   CARET_WIDTH_RANGE,
   EDITOR_FONT_SIZE_RANGE,
@@ -166,12 +171,15 @@ export default function AppearanceModal(props: {
   appearance: AppearancePreferences
   transfer: TransferPreferences
   editing: EditingPreferences
+  crashReporting: CrashReportingPreferences
+  crashReportingConfigured: boolean
   fonts: string[]
   fontsLoading: boolean
   ready: boolean
   onChange: (next: AppearancePreferences) => void
   onTransferChange: (next: TransferPreferences) => void
   onEditingChange: (next: EditingPreferences) => void
+  onCrashReportingChange: (next: CrashReportingPreferences) => void
   onRefreshFonts: () => void
   onReset: () => void
   onClose: () => void
@@ -421,6 +429,33 @@ export default function AppearanceModal(props: {
             <div class="batch-size-hint">
               The default is 500 MB. Data is streamed continuously and is not buffered to this size in memory.
             </div>
+          </section>
+
+          <div class="settings-group-heading">
+            <span>Privacy</span>
+            <small>Diagnostics sent when QueryNest crashes</small>
+          </div>
+          <section class="appearance-section">
+            <label class="crash-reporting-setting">
+              <span>
+                <b>Send crash reports</b>
+                <small>
+                  Sends error messages and stack traces to GlitchTip. Database contents, passwords, breadcrumbs, session
+                  recordings, and user identity are not intentionally attached.
+                </small>
+                {!props.crashReportingConfigured ? (
+                  <small>Crash reporting is not configured in this build.</small>
+                ) : null}
+              </span>
+              <input
+                type="checkbox"
+                checked={props.crashReporting.enabled}
+                disabled={!props.ready || (!props.crashReportingConfigured && !props.crashReporting.enabled)}
+                onChange={(event) =>
+                  props.onCrashReportingChange({ prompted: true, enabled: event.currentTarget.checked })
+                }
+              />
+            </label>
           </section>
           <div class="appearance-preview">
             <span>Preview</span>

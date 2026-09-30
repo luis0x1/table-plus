@@ -155,6 +155,7 @@ jobs:
       - name: Build Windows installer
         env:
           QUERYNEST_PORTABLE: "false"
+          QUERYNEST_GLITCHTIP_DSN: ${{ secrets.QUERYNEST_GLITCHTIP_DSN }}
         run: go run ./scripts/build.go -clean -m -s -skipbindings -trimpath -platform windows/amd64 -o QueryNest.exe -nsis
 
       - name: Package Windows installer
@@ -169,6 +170,7 @@ jobs:
       - name: Build Windows portable application
         env:
           QUERYNEST_PORTABLE: "true"
+          QUERYNEST_GLITCHTIP_DSN: ${{ secrets.QUERYNEST_GLITCHTIP_DSN }}
         run: go run ./scripts/build.go -clean -m -s -skipbindings -trimpath -platform windows/amd64 -o QueryNestPortal.exe
 
       - name: Package Windows portable application
@@ -263,6 +265,7 @@ jobs:
       - name: Build macOS application bundle
         env:
           QUERYNEST_PORTABLE: "false"
+          QUERYNEST_GLITCHTIP_DSN: ${{ secrets.QUERYNEST_GLITCHTIP_DSN }}
         run: go run ./scripts/build.go -clean -m -s -skipbindings -trimpath -platform darwin/universal -o QueryNest
 
       - name: Package macOS artifact

@@ -3,6 +3,7 @@ module tableplus-lite
 go 1.25.0
 
 require (
+	github.com/getsentry/sentry-go v0.49.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/wailsapp/wails/v2 v2.15.0
 	github.com/zalando/go-keyring v0.2.8

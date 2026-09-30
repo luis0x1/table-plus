@@ -51,6 +51,9 @@ type App struct {
 	previewFiles     map[string]previewedFile
 	operationsMu     sync.Mutex
 	operations       map[string]*runningOperation
+	crashRetryMu     sync.Mutex
+	crashRetryCancel context.CancelFunc
+	crashRetryGen    uint64
 }
 
 type runningOperation struct {
@@ -143,7 +146,11 @@ func NewApp() *App {
 
 func (a *App) startup(ctx context.Context) { a.ctx = ctx }
 
-func (a *App) shutdown(_ context.Context) { a.closeAllSessions(); _ = a.closeDB() }
+func (a *App) shutdown(_ context.Context) {
+	a.stopCrashReportRetryLoop()
+	a.closeAllSessions()
+	_ = a.closeDB()
+}
 
 func (a *App) GetStatus() ConnectionStatus {
 	a.mu.RLock()

@@ -1,6 +1,12 @@
 import { createEffect, createSignal, onCleanup, onMount } from 'solid-js'
 import { api } from '../backend/bridge'
-import type { AppearancePreferences, EditingPreferences, SidebarPreferences, TransferPreferences } from '../../types'
+import type {
+  AppearancePreferences,
+  CrashReportingPreferences,
+  EditingPreferences,
+  SidebarPreferences,
+  TransferPreferences,
+} from '../../types'
 
 export const DEFAULT_APPEARANCE: AppearancePreferences = { fontSize: 17, fontFamily: 'system' }
 export const DEFAULT_TRANSFER: TransferPreferences = { backupBatchSizeMB: 500 }
@@ -10,6 +16,7 @@ export const DEFAULT_EDITING: EditingPreferences = {
   editorFontSize: 12,
   editorFontFamily: 'mono',
 }
+export const DEFAULT_CRASH_REPORTING: CrashReportingPreferences = { prompted: false, enabled: false }
 export const UNDO_HISTORY_RANGE = { min: 10, max: 1000 }
 export const CARET_WIDTH_RANGE = { min: 1, max: 4 }
 export const EDITOR_FONT_SIZE_RANGE = { min: 10, max: 24 }
@@ -43,6 +50,7 @@ export default function useSidebarPreferences(onError: (message: string) => void
   const [appearance, setAppearanceState] = createSignal(DEFAULT_APPEARANCE)
   const [transfer, setTransferState] = createSignal(DEFAULT_TRANSFER)
   const [editing, setEditingState] = createSignal(DEFAULT_EDITING)
+  const [crashReporting, setCrashReportingState] = createSignal(DEFAULT_CRASH_REPORTING)
   const [ready, setReady] = createSignal(false)
   let latest = values()
   let saves = Promise.resolve()
@@ -61,6 +69,7 @@ export default function useSidebarPreferences(onError: (message: string) => void
         setAppearanceState(config.appearance)
         setTransferState(config.transfer)
         setEditingState(config.editing)
+        setCrashReportingState(config.crashReporting)
         setReady(true)
       })
       .catch((error) => {
@@ -147,5 +156,29 @@ export default function useSidebarPreferences(onError: (message: string) => void
       })
   }
 
-  return { values, setScale, commit, appearance, setAppearance, transfer, setTransfer, editing, setEditing, ready }
+  const setCrashReporting = (next: CrashReportingPreferences) => {
+    const normalized = { prompted: Boolean(next.prompted), enabled: Boolean(next.enabled) }
+    setCrashReportingState(normalized)
+    if (!ready()) return
+    saves = saves
+      .then(() => api().SaveCrashReportingPreferences(normalized))
+      .catch((error) => {
+        onError(`Could not save crash reporting settings: ${String(error)}`)
+      })
+  }
+
+  return {
+    values,
+    setScale,
+    commit,
+    appearance,
+    setAppearance,
+    transfer,
+    setTransfer,
+    editing,
+    setEditing,
+    crashReporting,
+    setCrashReporting,
+    ready,
+  }
 }

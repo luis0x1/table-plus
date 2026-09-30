@@ -1,6 +1,7 @@
 import type {
   AppConfig,
   AppearancePreferences,
+  CrashReportingPreferences,
   EditingPreferences,
   ScriptFile,
   SidebarPreferences,
@@ -26,6 +27,9 @@ type Backend = {
   SaveAppearancePreferences(preferences: AppearancePreferences): Promise<void>
   SaveTransferPreferences(preferences: TransferPreferences): Promise<void>
   SaveEditingPreferences(preferences: EditingPreferences): Promise<void>
+  SaveCrashReportingPreferences(preferences: CrashReportingPreferences): Promise<void>
+  CrashReportingConfigured(): Promise<boolean>
+  SetCrashReportingEnabled(enabled: boolean): Promise<void>
   ListSystemFonts(): Promise<string[]>
   ListDatabaseSessions(): Promise<ConnectionStatus[]>
   OpenPostgresSession(config: PostgresConfig): Promise<ConnectionStatus>
@@ -151,6 +155,7 @@ const defaultEditing: EditingPreferences = {
   editorFontSize: 12,
   editorFontFamily: 'mono',
 }
+const defaultCrashReporting: CrashReportingPreferences = { prompted: false, enabled: false }
 function mockAppConfig(legacy: SidebarPreferences): AppConfig {
   const stored = localStorage.getItem('querynest:preview-config')
   if (!stored)
@@ -160,6 +165,7 @@ function mockAppConfig(legacy: SidebarPreferences): AppConfig {
       appearance: defaultAppearance,
       transfer: defaultTransfer,
       editing: defaultEditing,
+      crashReporting: defaultCrashReporting,
     }
   const parsed = JSON.parse(stored) as Partial<AppConfig>
   return {
@@ -168,6 +174,7 @@ function mockAppConfig(legacy: SidebarPreferences): AppConfig {
     appearance: { ...defaultAppearance, ...parsed.appearance },
     transfer: { ...defaultTransfer, ...parsed.transfer },
     editing: { ...defaultEditing, ...parsed.editing },
+    crashReporting: { ...defaultCrashReporting, ...parsed.crashReporting },
   }
 }
 function saveMockConfig(config: AppConfig) {
@@ -247,6 +254,13 @@ const mock: Backend = {
   async SaveEditingPreferences(preferences) {
     saveMockConfig({ ...mockAppConfig({ databases: 1, tables: 1 }), editing: preferences })
   },
+  async SaveCrashReportingPreferences(preferences) {
+    saveMockConfig({ ...mockAppConfig({ databases: 1, tables: 1 }), crashReporting: preferences })
+  },
+  async CrashReportingConfigured() {
+    return false
+  },
+  async SetCrashReportingEnabled() {},
   async ListSystemFonts() {
     return ['Arial', 'Georgia', 'Inter', 'Times New Roman', 'Trebuchet MS', 'Verdana']
   },

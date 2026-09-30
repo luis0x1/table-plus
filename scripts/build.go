@@ -1,7 +1,8 @@
 //go:build ignore
 
 // Command build creates a QueryNest desktop or portable binary. Set
-// QUERYNEST_PORTABLE=true to select portable storage beside the application.
+// QUERYNEST_PORTABLE=true to select portable storage beside the application and
+// QUERYNEST_GLITCHTIP_DSN to embed the backend crash-reporting DSN.
 package main
 
 import (
@@ -27,7 +28,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	args := []string{"build", "-ldflags", "-X main.appBuildMode=" + mode}
+	ldflags := "-X main.appBuildMode=" + mode
+	if dsn := strings.TrimSpace(os.Getenv("QUERYNEST_GLITCHTIP_DSN")); dsn != "" {
+		ldflags += " -X main.glitchTipDSN=" + dsn
+	}
+	args := []string{"build", "-ldflags", ldflags}
 	args = append(args, buildArgs...)
 	command := exec.Command("wails", args...)
 	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr

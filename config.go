@@ -32,12 +32,18 @@ type EditingPreferences struct {
 	EditorFontFamily string `json:"editorFontFamily"`
 }
 
+type CrashReportingPreferences struct {
+	Prompted bool `json:"prompted"`
+	Enabled  bool `json:"enabled"`
+}
+
 type AppConfig struct {
-	Version    int                   `json:"version"`
-	Sidebars   SidebarPreferences    `json:"sidebars"`
-	Appearance AppearancePreferences `json:"appearance"`
-	Transfer   TransferPreferences   `json:"transfer"`
-	Editing    EditingPreferences    `json:"editing"`
+	Version        int                       `json:"version"`
+	Sidebars       SidebarPreferences        `json:"sidebars"`
+	Appearance     AppearancePreferences     `json:"appearance"`
+	Transfer       TransferPreferences       `json:"transfer"`
+	Editing        EditingPreferences        `json:"editing"`
+	CrashReporting CrashReportingPreferences `json:"crashReporting"`
 }
 
 func defaultAppConfig() AppConfig {
@@ -47,6 +53,10 @@ func defaultAppConfig() AppConfig {
 		Appearance: AppearancePreferences{FontSize: 17, FontFamily: "system"},
 		Transfer:   TransferPreferences{BackupBatchSizeMB: 500},
 		Editing:    EditingPreferences{UndoHistoryLimit: 100, CaretWidth: 2, EditorFontSize: 12, EditorFontFamily: "mono"},
+		CrashReporting: CrashReportingPreferences{
+			Prompted: false,
+			Enabled:  false,
+		},
 	}
 }
 
@@ -214,6 +224,21 @@ func (a *App) SaveEditingPreferences(preferences EditingPreferences) error {
 	return writeAppConfig(path, config, fields)
 }
 
+func (a *App) SaveCrashReportingPreferences(preferences CrashReportingPreferences) error {
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	path, err := a.appConfigPath()
+	if err != nil {
+		return err
+	}
+	config, fields, err := readAppConfig(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	config.Version, config.CrashReporting = 1, preferences
+	return writeAppConfig(path, config, fields)
+}
+
 func readAppConfig(path string) (AppConfig, map[string]json.RawMessage, error) {
 	config := defaultAppConfig()
 	data, err := os.ReadFile(path)
@@ -298,6 +323,18 @@ func writeAppConfig(path string, config AppConfig, fields map[string]json.RawMes
 	editing["editorFontSize"], _ = json.Marshal(config.Editing.EditorFontSize)
 	editing["editorFontFamily"], _ = json.Marshal(config.Editing.EditorFontFamily)
 	fields["editing"], _ = json.Marshal(editing)
+	crashReporting := make(map[string]json.RawMessage)
+	if raw := fields["crashReporting"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &crashReporting); err != nil {
+			return fmt.Errorf("read crash reporting configuration: %w", err)
+		}
+		if crashReporting == nil {
+			crashReporting = make(map[string]json.RawMessage)
+		}
+	}
+	crashReporting["prompted"], _ = json.Marshal(config.CrashReporting.Prompted)
+	crashReporting["enabled"], _ = json.Marshal(config.CrashReporting.Enabled)
+	fields["crashReporting"], _ = json.Marshal(crashReporting)
 	fields["version"], _ = json.Marshal(config.Version)
 	data, err := json.MarshalIndent(fields, "", "  ")
 	if err != nil {

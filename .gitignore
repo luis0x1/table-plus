@@ -13,3 +13,6 @@ frontend/package.json.md5
 
 # Binary produced by a bare `go build ./...` in the repository root.
 /tableplus-lite
+.env
+.env.*
+!.env.example

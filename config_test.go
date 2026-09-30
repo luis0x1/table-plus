@@ -254,3 +254,23 @@ func TestAppConfigWithoutCaretWidthKeepsDefault(t *testing.T) {
 		t.Fatalf("missing caret width: %#v, %v", config.Editing, err)
 	}
 }
+
+func TestCrashReportingPreferencesRoundTrip(t *testing.T) {
+	app := NewApp()
+	app.configPath = filepath.Join(t.TempDir(), "config.json")
+	config, err := app.LoadAppConfig(SidebarPreferences{Databases: 1, Tables: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.CrashReporting != (CrashReportingPreferences{}) {
+		t.Fatalf("crash reporting must default to opt-out: %#v", config.CrashReporting)
+	}
+	want := CrashReportingPreferences{Prompted: true, Enabled: true}
+	if err := app.SaveCrashReportingPreferences(want); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := app.LoadAppConfig(SidebarPreferences{Databases: 1, Tables: 1})
+	if err != nil || reloaded.CrashReporting != want {
+		t.Fatalf("persisted crash reporting preferences: %#v, %v", reloaded.CrashReporting, err)
+	}
+}
